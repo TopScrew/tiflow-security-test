@@ -682,7 +682,18 @@ func tryGetEndTs(db *sql.DB, tidbAPIEndpoint, tableName string) (result uint64, 
 	return ddlJob[0].Binlog.FinishedTS, true
 }
 
-func tryGetEndTsFromLog(_ *sql.DB, tableName string) (result uint64, ok bool) {
+func tryGetEndTsFromLog(db *sql.DB, tableName string) (result uint64, ok bool) {
+	query := "SELECT JOB_ID FROM information_schema.ddl_jobs WHERE table_name = ?"
+	log.Info("try get end ts", zap.String("query", query), zap.String("tableName", tableName))
+	var jobID uint64
+	row := db.QueryRow(query, tableName)
+	if err := row.Scan(&jobID); err != nil {
+		if err != sql.ErrNoRows {
+			log.Info("rows scan failed", zap.Error(err))
+		}
+		return 0, false
+	}
+
 	log.Info("try parse finishedTs from ticdc log", zap.String("tableName", tableName))
 
 	logFilePath := "/tmp/tidb_cdc_test/bank"
@@ -715,23 +726,16 @@ func tryGetEndTsFromLog(_ *sql.DB, tableName string) (result uint64, ok bool) {
 		}
 		defer file.Close()
 
-		reader := bufio.NewReader(file)
-		for {
-			bs, _, err := reader.ReadLine()
-			if err != nil {
-				if err != io.EOF {
-					fmt.Printf("Error reading file: %v\n", err)
-				}
-				return 0, false
-			}
-			line := string(bs)
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := scanner.Text()
 			if !logRegex.MatchString(line) || !tableNameRegex.MatchString(line) {
 				continue
 			}
 
 			matches := timeStampRegex.FindStringSubmatch(line)
 			if len(matches) > 1 {
-				fmt.Println("found first match line, Match Result: ", matches[1], ", line: ", line)
+				fmt.Println("found first match line: ", matches[1], ": ", line)
 				// convert to uint64
 				result, err := strconv.ParseUint(matches[1], 10, 64)
 				if err != nil {
@@ -739,6 +743,10 @@ func tryGetEndTsFromLog(_ *sql.DB, tableName string) (result uint64, ok bool) {
 				}
 				return result, true
 			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			log.Error("Error scanning file: %v", zap.Error(err))
 		}
 	}
 	return 0, false

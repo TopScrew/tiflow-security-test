@@ -314,11 +314,8 @@ func (c *consumer) emitDMLEvents(
 		// Always enable tidb extension for canal-json protocol
 		// because we need to get the commit ts from the extension field.
 		c.codecCfg.EnableTiDBExtension = true
-		decoder, err = canal.NewBatchDecoder(ctx, c.codecCfg, nil)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		err := decoder.AddKeyValue(nil, content)
+		decoder = canal.NewCanalJSONTxnEventDecoder(c.codecCfg)
+		err = decoder.AddKeyValue(nil, content)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -368,7 +365,7 @@ func (c *consumer) emitDMLEvents(
 				)
 				continue
 			}
-			row.Table.TableID = tableID
+			row.PhysicalTableID = tableID
 			c.tableSinkMap[tableID].AppendRowChangedEvents(row)
 			filteredCnt++
 		}
@@ -647,7 +644,7 @@ func main() {
 	if enableProfiling {
 		go func() {
 			server := &http.Server{
-				Addr:              ":6060",
+				Addr:              "127.0.0.1:6060",
 				ReadHeaderTimeout: 5 * time.Second,
 			}
 

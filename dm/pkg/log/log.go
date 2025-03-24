@@ -17,10 +17,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/pingcap/errors"
 	pclog "github.com/pingcap/log"
-	lightningLog "github.com/pingcap/tidb/br/pkg/lightning/log"
+	lightningLog "github.com/pingcap/tidb/pkg/lightning/log"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tiflow/dm/pkg/helper"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
@@ -193,4 +194,33 @@ func WrapStringerField(message string, object fmt.Stringer) zap.Field {
 // WithCtx adds fields from ctx to the logger.
 func WithCtx(ctx context.Context) Logger {
 	return Logger{appLogger.With(getZapFieldsFromCtx(ctx)...)}
+}
+
+var enabledRedactLog atomic.Bool
+
+func init() {
+	SetRedactLog(false)
+}
+
+// IsRedactLogEnabled indicates whether the log desensitization is enabled.
+func IsRedactLogEnabled() bool {
+	return enabledRedactLog.Load()
+}
+
+// SetRedactLog sets enabledRedactLog.
+func SetRedactLog(enabled bool) {
+	enabledRedactLog.Store(enabled)
+}
+
+// RedactString receives string argument and return omitted information if redact log enabled.
+func RedactString(arg string) string {
+	if IsRedactLogEnabled() {
+		return "?"
+	}
+	return arg
+}
+
+// ZapRedactString receives string argument and return omitted information in zap.Field if redact log enabled.
+func ZapRedactString(key, arg string) zap.Field {
+	return zap.String(key, RedactString(arg))
 }

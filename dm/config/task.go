@@ -28,11 +28,12 @@ import (
 	"github.com/coreos/go-semver/semver"
 	"github.com/docker/go-units"
 	"github.com/dustin/go-humanize"
-	"github.com/pingcap/tidb/br/pkg/lightning/config"
+	"github.com/pingcap/tidb/pkg/lightning/config"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/util/filter"
 	router "github.com/pingcap/tidb/pkg/util/table-router"
 	"github.com/pingcap/tiflow/dm/config/dbconfig"
+	"github.com/pingcap/tiflow/dm/config/security"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
@@ -301,6 +302,9 @@ type LoaderConfig struct {
 	RangeConcurrency    int                          `yaml:"range-concurrency" toml:"range-concurrency" json:"range-concurrency"`
 	CompressKVPairs     string                       `yaml:"compress-kv-pairs" toml:"compress-kv-pairs" json:"compress-kv-pairs"`
 	PDAddr              string                       `yaml:"pd-addr" toml:"pd-addr" json:"pd-addr"`
+	// now only creating task by OpenAPI will use the `Security` field to connect PD.
+	// TODO: support setting `Security` by dmctl
+	Security *security.Security `yaml:"-" toml:"security" json:"security"`
 }
 
 // DefaultLoaderConfig return default loader config for task.
@@ -345,9 +349,6 @@ func (m *LoaderConfig) adjust() error {
 		m.PoolSize = defaultPoolSize
 	}
 
-	if m.OnDuplicateLogical == "" && m.OnDuplicate != "" {
-		m.OnDuplicateLogical = m.OnDuplicate
-	}
 	if m.OnDuplicateLogical == "" {
 		m.OnDuplicateLogical = OnDuplicateReplace
 	}
@@ -631,8 +632,8 @@ func (c *TaskConfig) DecodeFile(fpath string) error {
 	return c.adjust()
 }
 
-// Decode loads config from file data.
-func (c *TaskConfig) Decode(data string) error {
+// FromYaml loads config from file data.
+func (c *TaskConfig) FromYaml(data string) error {
 	err := yaml.UnmarshalStrict([]byte(data), c)
 	if err != nil {
 		return terror.ErrConfigYamlTransform.Delegate(err, "decode task config failed")
@@ -672,7 +673,7 @@ func (c *TaskConfig) adjust() error {
 		return terror.ErrConfigNeedUniqueTaskName.Generate()
 	}
 	switch c.TaskMode {
-	case ModeFull, ModeIncrement, ModeAll, ModeDump, ModeLoadSync:
+	case ModeFull, ModeIncrement, ModeAll, ModeDump, ModeLoad, ModeLoadSync:
 	default:
 		return terror.ErrConfigInvalidTaskMode.Generate()
 	}
@@ -777,9 +778,9 @@ func (c *TaskConfig) adjust() error {
 		instanceIDs[inst.SourceID] = i
 
 		switch c.TaskMode {
-		case ModeFull, ModeAll, ModeDump:
+		case ModeFull, ModeAll, ModeDump, ModeLoad:
 			if inst.Meta != nil {
-				log.L().Warn("metadata will not be used. for Full mode, incremental sync will never occur; for All mode, the meta dumped by MyDumper will be used", zap.Int("mysql instance", i), zap.String("task mode", c.TaskMode))
+				log.L().Warn("metadata will not be used. for Full/Dump/Load mode, incremental sync will never occur; for All mode, the meta dumped by MyDumper will be used", zap.Int("mysql instance", i), zap.String("task mode", c.TaskMode))
 			}
 		case ModeIncrement:
 			if inst.Meta == nil {
@@ -1022,11 +1023,10 @@ func getGenerateName(rule interface{}, nameIdx int, namePrefix string, nameMap m
 		return fmt.Sprintf("%s-%02d", namePrefix, nameIdx), nameIdx + 1
 	} else if val, ok := nameMap[string(ruleByte)]; ok {
 		return val, nameIdx
-	} else {
-		ruleName := fmt.Sprintf("%s-%02d", namePrefix, nameIdx+1)
-		nameMap[string(ruleByte)] = ruleName
-		return ruleName, nameIdx + 1
 	}
+	ruleName := fmt.Sprintf("%s-%02d", namePrefix, nameIdx+1)
+	nameMap[string(ruleByte)] = ruleName
+	return ruleName, nameIdx + 1
 }
 
 // checkDuplicateString checks whether the given string array has duplicate string item
@@ -1079,12 +1079,8 @@ func checkValidExpr(expr string) error {
 func (c *TaskConfig) YamlForDowngrade() (string, error) {
 	t := NewTaskConfigForDowngrade(c)
 
-	// encrypt password
-	cipher, err := utils.Encrypt(utils.DecryptOrPlaintext(t.TargetDB.Password))
-	if err != nil {
-		return "", err
-	}
-	t.TargetDB.Password = cipher
+	// try to encrypt password
+	t.TargetDB.Password = utils.EncryptOrPlaintext(utils.DecryptOrPlaintext(t.TargetDB.Password))
 
 	// omit default values, so we can ignore them for later marshal
 	t.omitDefaultVals()
@@ -1253,6 +1249,7 @@ type TaskConfigForDowngrade struct {
 
 // NewTaskConfigForDowngrade create new TaskConfigForDowngrade.
 func NewTaskConfigForDowngrade(taskConfig *TaskConfig) *TaskConfigForDowngrade {
+	targetDB := *taskConfig.TargetDB
 	return &TaskConfigForDowngrade{
 		Name:                      taskConfig.Name,
 		TaskMode:                  taskConfig.TaskMode,
@@ -1266,7 +1263,7 @@ func NewTaskConfigForDowngrade(taskConfig *TaskConfig) *TaskConfigForDowngrade {
 		HeartbeatReportInterval:   taskConfig.HeartbeatReportInterval,
 		Timezone:                  taskConfig.Timezone,
 		CaseSensitive:             taskConfig.CaseSensitive,
-		TargetDB:                  taskConfig.TargetDB,
+		TargetDB:                  &targetDB,
 		OnlineDDLScheme:           taskConfig.OnlineDDLScheme,
 		Routes:                    taskConfig.Routes,
 		Filters:                   taskConfig.Filters,

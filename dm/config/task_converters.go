@@ -101,6 +101,8 @@ func TaskConfigToSubTaskConfigs(c *TaskConfig, sources map[string]dbconfig.DBCon
 
 		cfg.CleanDumpFile = c.CleanDumpFile
 
+		cfg.InitIOCounters()
+
 		if err := cfg.Adjust(true); err != nil {
 			return nil, terror.Annotatef(err, "source %s", inst.SourceID)
 		}
@@ -199,6 +201,15 @@ func OpenAPITaskToSubTaskConfigs(task *openapi.Task, toDBCfg *dbconfig.DBConfig,
 		subTaskCfg.MydumperConfig = DefaultMydumperConfig()
 		subTaskCfg.LoaderConfig = DefaultLoaderConfig()
 		if fullCfg := task.SourceConfig.FullMigrateConf; fullCfg != nil {
+			if fullCfg.Analyze != nil {
+				subTaskCfg.LoaderConfig.Analyze = PhysicalPostOpLevel(*fullCfg.Analyze)
+			}
+			if fullCfg.Checksum != nil {
+				subTaskCfg.LoaderConfig.ChecksumPhysical = PhysicalPostOpLevel(*fullCfg.Checksum)
+			}
+			if fullCfg.CompressKvPairs != nil {
+				subTaskCfg.CompressKVPairs = *fullCfg.CompressKvPairs
+			}
 			if fullCfg.Consistency != nil {
 				subTaskCfg.MydumperConfig.ExtraArgs = fmt.Sprintf("--consistency %s", *fullCfg.Consistency)
 			}
@@ -211,7 +222,44 @@ func OpenAPITaskToSubTaskConfigs(task *openapi.Task, toDBCfg *dbconfig.DBConfig,
 			if fullCfg.DataDir != nil {
 				subTaskCfg.LoaderConfig.Dir = *fullCfg.DataDir
 			}
-			subTaskCfg.LoaderConfig.OnDuplicateLogical = LogicalDuplicateResolveType(task.OnDuplicate)
+			if fullCfg.DiskQuota != nil {
+				if err := subTaskCfg.LoaderConfig.DiskQuotaPhysical.UnmarshalText([]byte(*fullCfg.DiskQuota)); err != nil {
+					return nil, err
+				}
+			}
+			if fullCfg.ImportMode != nil {
+				subTaskCfg.LoaderConfig.ImportMode = LoadMode(*fullCfg.ImportMode)
+			}
+			if fullCfg.OnDuplicateLogical != nil {
+				subTaskCfg.LoaderConfig.OnDuplicateLogical = LogicalDuplicateResolveType(*fullCfg.OnDuplicateLogical)
+			}
+			if fullCfg.OnDuplicatePhysical != nil {
+				subTaskCfg.LoaderConfig.OnDuplicatePhysical = PhysicalDuplicateResolveType(*fullCfg.OnDuplicatePhysical)
+			}
+			if fullCfg.PdAddr != nil {
+				subTaskCfg.LoaderConfig.PDAddr = *fullCfg.PdAddr
+			}
+			if fullCfg.Security != nil {
+				if fullCfg.Security.SslCaContent == "" || fullCfg.Security.SslCertContent == "" || fullCfg.Security.SslKeyContent == "" {
+					return nil, terror.ErrOpenAPICommonError.Generatef("Invalid security config, full migrate conf's security fields should not be \"\"")
+				}
+				var certAllowedCN []string
+				if fullCfg.Security.CertAllowedCn != nil {
+					certAllowedCN = *fullCfg.Security.CertAllowedCn
+				}
+				subTaskCfg.LoaderConfig.Security = &security.Security{
+					SSLCABytes:    []byte(fullCfg.Security.SslCaContent),
+					SSLCertBytes:  []byte(fullCfg.Security.SslCertContent),
+					SSLKeyBytes:   []byte(fullCfg.Security.SslKeyContent),
+					CertAllowedCN: certAllowedCN,
+				}
+			}
+			if fullCfg.RangeConcurrency != nil {
+				subTaskCfg.LoaderConfig.RangeConcurrency = *fullCfg.RangeConcurrency
+			}
+			if fullCfg.SortingDir != nil {
+				subTaskCfg.LoaderConfig.SortingDirPhysical = *fullCfg.SortingDir
+			}
 		}
 		// set incremental config
 		subTaskCfg.SyncerConfig = DefaultSyncerConfig()
@@ -277,6 +325,8 @@ func OpenAPITaskToSubTaskConfigs(task *openapi.Task, toDBCfg *dbconfig.DBConfig,
 		if task.IgnoreCheckingItems != nil && len(*task.IgnoreCheckingItems) != 0 {
 			subTaskCfg.IgnoreCheckingItems = *task.IgnoreCheckingItems
 		}
+		// set syncer IO total bytes counter
+		subTaskCfg.InitIOCounters()
 		// adjust sub task config
 		if err := subTaskCfg.Adjust(true); err != nil {
 			return nil, terror.Annotatef(err, "source name %s", sourceCfg.SourceName)
@@ -505,6 +555,14 @@ func SubTaskConfigsToOpenAPITask(subTaskConfigList []*SubTaskConfig) *openapi.Ta
 		DataDir:       &oneSubtaskConfig.LoaderConfig.Dir,
 		ImportThreads: &oneSubtaskConfig.LoaderConfig.PoolSize,
 	}
+	// only load task use physical mode need PD address
+	if oneSubtaskConfig.LoaderConfig.ImportMode == LoadModePhysical {
+		taskSourceConfig.FullMigrateConf.PdAddr = &oneSubtaskConfig.LoaderConfig.PDAddr
+	}
+	importMode := openapi.TaskFullMigrateConfImportMode(oneSubtaskConfig.LoaderConfig.ImportMode)
+	if importMode != "" {
+		taskSourceConfig.FullMigrateConf.ImportMode = &importMode
+	}
 	consistencyInTask := oneSubtaskConfig.MydumperConfig.ExtraArgs
 	consistency := strings.Replace(consistencyInTask, "--consistency ", "", 1)
 	if consistency != "" {
@@ -513,6 +571,18 @@ func SubTaskConfigsToOpenAPITask(subTaskConfigList []*SubTaskConfig) *openapi.Ta
 	taskSourceConfig.IncrMigrateConf = &openapi.TaskIncrMigrateConf{
 		ReplBatch:   &oneSubtaskConfig.SyncerConfig.Batch,
 		ReplThreads: &oneSubtaskConfig.SyncerConfig.WorkerCount,
+	}
+	if oneSubtaskConfig.LoaderConfig.Security != nil {
+		var certAllowedCN []string
+		if oneSubtaskConfig.LoaderConfig.Security.CertAllowedCN != nil {
+			certAllowedCN = oneSubtaskConfig.LoaderConfig.Security.CertAllowedCN
+		}
+		taskSourceConfig.FullMigrateConf.Security = &openapi.Security{
+			SslCaContent:   string(oneSubtaskConfig.LoaderConfig.Security.SSLCABytes),
+			SslCertContent: string(oneSubtaskConfig.LoaderConfig.Security.SSLCertBytes),
+			SslKeyContent:  string(oneSubtaskConfig.LoaderConfig.Security.SSLKeyBytes),
+			CertAllowedCn:  &certAllowedCN,
+		}
 	}
 	// set filter rules
 	filterRuleMap := openapi.Task_BinlogFilterRule{}
@@ -540,21 +610,14 @@ func SubTaskConfigsToOpenAPITask(subTaskConfigList []*SubTaskConfig) *openapi.Ta
 	ruleMap := map[string]struct{}{}
 	appendOneRule := func(sourceName, schemaPattern, tablePattern, targetSchema, targetTable string) {
 		tableMigrateRule := openapi.TaskTableMigrateRule{
-			Source: struct {
-				Schema     string `json:"schema"`
-				SourceName string `json:"source_name"`
-				Table      string `json:"table"`
-			}{
+			Source: openapi.TaskTableMigrateRuleSource{
 				Schema:     schemaPattern,
 				SourceName: sourceName,
 				Table:      tablePattern,
 			},
 		}
 		if targetSchema != "" {
-			tableMigrateRule.Target = &struct {
-				Schema *string `json:"schema,omitempty"`
-				Table  *string `json:"table,omitempty"`
-			}{
+			tableMigrateRule.Target = &openapi.TaskTableMigrateRuleTarget{
 				Schema: &targetSchema,
 			}
 			if targetTable != "" {
@@ -625,6 +688,18 @@ func SubTaskConfigsToOpenAPITask(subTaskConfigList []*SubTaskConfig) *openapi.Ta
 		ignoreItems := oneSubtaskConfig.IgnoreCheckingItems
 		task.IgnoreCheckingItems = &ignoreItems
 	}
+	if oneSubtaskConfig.To.Security != nil {
+		var certAllowedCN []string
+		if oneSubtaskConfig.To.Security.CertAllowedCN != nil {
+			certAllowedCN = oneSubtaskConfig.To.Security.CertAllowedCN
+		}
+		task.TargetConfig.Security = &openapi.Security{
+			SslCaContent:   string(oneSubtaskConfig.To.Security.SSLCABytes),
+			SslCertContent: string(oneSubtaskConfig.To.Security.SSLCertBytes),
+			SslKeyContent:  string(oneSubtaskConfig.To.Security.SSLKeyBytes),
+			CertAllowedCn:  &certAllowedCN,
+		}
+	}
 	return &task
 }
 
@@ -633,8 +708,6 @@ func TaskConfigToOpenAPITask(c *TaskConfig, sourceCfgMap map[string]*SourceConfi
 	cfgs := make(map[string]dbconfig.DBConfig)
 	for _, source := range c.MySQLInstances {
 		if cfg, ok := sourceCfgMap[source.SourceID]; ok {
-			// check the password
-			cfg.DecryptPassword()
 			cfgs[source.SourceID] = cfg.From
 		}
 	}

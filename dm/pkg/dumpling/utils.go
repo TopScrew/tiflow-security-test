@@ -35,7 +35,9 @@ import (
 )
 
 // DefaultTableFilter is the default table filter for dumpling.
-var DefaultTableFilter = []string{"*.*", export.DefaultTableFilter}
+// Different with Dumpling, dm's case sensitivity is determined by the `lower_case_table_names` parameter from upstream,
+// so filter both uppercase and lowercase tables.
+var DefaultTableFilter = []string{"*.*", export.DefaultTableFilter, "!/^(information_schema|performance_schema|metrics_schema|inspection_schema)$/.*"}
 
 // ParseMetaData parses mydumper's output meta file and returns binlog location.
 // since v2.0.0, dumpling maybe configured to output master status after connection pool is established,
@@ -45,7 +47,6 @@ func ParseMetaData(
 	ctx context.Context,
 	dir string,
 	filename string,
-	flavor string,
 	extStorage brstorage.ExternalStorage,
 ) (*binlog.Location, *binlog.Location, error) {
 	fd, err := storage.OpenFile(ctx, dir, filename, extStorage)
@@ -54,11 +55,11 @@ func ParseMetaData(
 	}
 	defer fd.Close()
 
-	return parseMetaDataByReader(filename, flavor, fd)
+	return ParseMetaDataByReader(filename, fd)
 }
 
-// ParseMetaData parses mydumper's output meta file by created reader and returns binlog location.
-func parseMetaDataByReader(filename, flavor string, rd io.Reader) (*binlog.Location, *binlog.Location, error) {
+// ParseMetaDataByReader parses mydumper's output meta file by created reader and returns binlog location.
+func ParseMetaDataByReader(filename string, rd io.Reader) (*binlog.Location, *binlog.Location, error) {
 	invalidErr := fmt.Errorf("file %s invalid format", filename)
 
 	var (
@@ -101,7 +102,7 @@ func parseMetaDataByReader(filename, flavor string, rd io.Reader) (*binlog.Locat
 				pos.Pos = uint32(pos64)
 			case "GTID":
 				// multiple GTID sets may cross multiple lines, continue to read them.
-				following, err3 := readFollowingGTIDs(br, flavor)
+				following, err3 := readFollowingGTIDs(br)
 				if err3 != nil {
 					return err3
 				}
@@ -124,7 +125,8 @@ func parseMetaDataByReader(filename, flavor string, rd io.Reader) (*binlog.Locat
 		}
 
 		switch line {
-		case "SHOW MASTER STATUS:":
+		case "SHOW BINARY LOG STATUS:",
+			"SHOW MASTER STATUS:":
 			if err3 := parsePosAndGTID(&pos, &gtidStr); err3 != nil {
 				return nil, nil, err3
 			}
@@ -154,7 +156,7 @@ func parseMetaDataByReader(filename, flavor string, rd io.Reader) (*binlog.Locat
 		return nil, nil, terror.ErrMetadataNoBinlogLoc.Generate(filename)
 	}
 
-	gset, err := gtid.ParserGTID(flavor, gtidStr)
+	gset, err := gtid.ParserGTID("", gtidStr)
 	if err != nil {
 		return nil, nil, invalidErr
 	}
@@ -165,7 +167,7 @@ func parseMetaDataByReader(filename, flavor string, rd io.Reader) (*binlog.Locat
 		if len(pos2.Name) == 0 || pos2.Pos == uint32(0) {
 			return nil, nil, invalidErr
 		}
-		gset2, err := gtid.ParserGTID(flavor, gtidStr2)
+		gset2, err := gtid.ParserGTID("", gtidStr2)
 		if err != nil {
 			return nil, nil, invalidErr
 		}
@@ -176,7 +178,7 @@ func parseMetaDataByReader(filename, flavor string, rd io.Reader) (*binlog.Locat
 	return locPtr, locPtr2, nil
 }
 
-func readFollowingGTIDs(br *bufio.Reader, flavor string) (string, error) {
+func readFollowingGTIDs(br *bufio.Reader) (string, error) {
 	var following strings.Builder
 	for {
 		line, err := br.ReadString('\n')
@@ -197,7 +199,7 @@ func readFollowingGTIDs(br *bufio.Reader, flavor string) (string, error) {
 		}
 
 		// try parse to verify it
-		_, err = gtid.ParserGTID(flavor, line[:end])
+		_, err = gtid.ParserGTID("", line[:end])
 		if err != nil {
 			// nolint:nilerr
 			return following.String(), nil // return the previous, not including this non-GTID line.
@@ -252,7 +254,7 @@ func ParseExtraArgs(logger *log.Logger, dumpCfg *export.Config, args []string) e
 	dumplingFlagSet.Uint64VarP(&dumpCfg.Rows, "rows", "r", dumpCfg.Rows, "Split table into chunks of this many rows, default unlimited")
 	dumplingFlagSet.StringVar(&dumpCfg.Where, "where", dumpCfg.Where, "Dump only selected records")
 	dumplingFlagSet.BoolVar(&dumpCfg.EscapeBackslash, "escape-backslash", dumpCfg.EscapeBackslash, "Use backslash to escape quotation marks")
-	dumplingFlagSet.StringArrayVarP(&filters, "filter", "f", DefaultTableFilter, "Filter to select which tables to dump")
+	dumplingFlagSet.StringArrayVarP(&filters, "filter", "f", []string{"*.*", export.DefaultTableFilter}, "Filter to select which tables to dump")
 	dumplingFlagSet.StringVar(&dumpCfg.Security.CAPath, "ca", dumpCfg.Security.CAPath, "The path name to the certificate authority file for TLS connection")
 	dumplingFlagSet.StringVar(&dumpCfg.Security.CertPath, "cert", dumpCfg.Security.CertPath, "The path name to the client certificate file for TLS connection")
 	dumplingFlagSet.StringVar(&dumpCfg.Security.KeyPath, "key", dumpCfg.Security.KeyPath, "The path name to the client private key file for TLS connection")
@@ -282,7 +284,7 @@ func ParseExtraArgs(logger *log.Logger, dumpCfg *export.Config, args []string) e
 		}
 	}
 
-	if len(tablesList) > 0 || !utils.NonRepeatStringsEqual(DefaultTableFilter, filters) {
+	if len(tablesList) > 0 || !utils.NonRepeatStringsEqual([]string{"*.*", export.DefaultTableFilter}, filters) {
 		ff, err2 := export.ParseTableFilter(tablesList, filters)
 		if err2 != nil {
 			return err2

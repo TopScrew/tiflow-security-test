@@ -24,12 +24,12 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/br/pkg/lightning"
-	"github.com/pingcap/tidb/br/pkg/lightning/checkpoints"
-	"github.com/pingcap/tidb/br/pkg/lightning/common"
-	lcfg "github.com/pingcap/tidb/br/pkg/lightning/config"
-	"github.com/pingcap/tidb/br/pkg/lightning/errormanager"
 	"github.com/pingcap/tidb/dumpling/export"
+	lserver "github.com/pingcap/tidb/lightning/pkg/server"
+	"github.com/pingcap/tidb/pkg/lightning/checkpoints"
+	"github.com/pingcap/tidb/pkg/lightning/common"
+	lcfg "github.com/pingcap/tidb/pkg/lightning/config"
+	"github.com/pingcap/tidb/pkg/lightning/errormanager"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	tidbpromutil "github.com/pingcap/tidb/pkg/util/promutil"
 	"github.com/pingcap/tiflow/dm/config"
@@ -68,7 +68,7 @@ type LightningLoader struct {
 
 	logger log.Logger
 	cli    *clientv3.Client
-	core   *lightning.Lightning
+	core   *lserver.Lightning
 	cancel context.CancelFunc // for per task context, which maybe different from lightning context
 
 	toDB *conn.BaseDB
@@ -96,7 +96,7 @@ func NewLightning(cfg *config.SubTaskConfig, cli *clientv3.Client, workerName st
 		cli:                   cli,
 		workerName:            workerName,
 		lightningGlobalConfig: lightningCfg,
-		core:                  lightning.New(lightningCfg),
+		core:                  lserver.New(lightningCfg),
 		logger:                logger.WithFields(zap.String("task", cfg.Name), zap.String("unit", "lightning-load")),
 		speedRecorder:         export.NewSpeedRecorder(),
 	}
@@ -234,7 +234,7 @@ func (l *LightningLoader) runLightning(ctx context.Context, cfg *lcfg.Config) (e
 		return err
 	}
 
-	var opts []lightning.Option
+	var opts []lserver.Option
 	if l.cfg.MetricsFactory != nil {
 		// this branch means dataflow engine has set a Factory, the Factory itself
 		// will register and deregister metrics, but lightning will expect the
@@ -242,13 +242,13 @@ func (l *LightningLoader) runLightning(ctx context.Context, cfg *lcfg.Config) (e
 		// So we use dataflow engine's Factory to register, and use dataflow engine's
 		// global metrics to manually deregister.
 		opts = append(opts,
-			lightning.WithPromFactory(
+			lserver.WithPromFactory(
 				promutil.NewWrappingFactory(
 					l.cfg.MetricsFactory,
 					"",
 					prometheus.Labels{"task": l.cfg.Name, "source_id": l.cfg.SourceID},
 				)),
-			lightning.WithPromRegistry(promutil.GetGlobalMetricRegistry()))
+			lserver.WithPromRegistry(promutil.GetGlobalMetricRegistry()))
 	} else {
 		registry := prometheus.DefaultGatherer.(prometheus.Registerer)
 		failpoint.Inject("DontUnregister", func() {
@@ -256,28 +256,28 @@ func (l *LightningLoader) runLightning(ctx context.Context, cfg *lcfg.Config) (e
 		})
 
 		opts = append(opts,
-			lightning.WithPromFactory(
+			lserver.WithPromFactory(
 				promutil.NewWrappingFactory(
 					tidbpromutil.NewDefaultFactory(),
 					"",
 					prometheus.Labels{"task": l.cfg.Name, "source_id": l.cfg.SourceID},
 				),
 			),
-			lightning.WithPromRegistry(registry))
+			lserver.WithPromRegistry(registry))
 	}
 	if l.cfg.ExtStorage != nil {
 		opts = append(opts,
-			lightning.WithDumpFileStorage(l.cfg.ExtStorage))
+			lserver.WithDumpFileStorage(l.cfg.ExtStorage))
 	}
 	if l.cfg.FrameworkLogger != nil {
-		opts = append(opts, lightning.WithLogger(l.cfg.FrameworkLogger))
+		opts = append(opts, lserver.WithLogger(l.cfg.FrameworkLogger))
 	} else {
-		opts = append(opts, lightning.WithLogger(l.logger.Logger))
+		opts = append(opts, lserver.WithLogger(l.logger.Logger))
 	}
 
 	var hasDup atomic.Bool
 	if l.cfg.LoaderConfig.ImportMode == config.LoadModePhysical {
-		opts = append(opts, lightning.WithDupIndicator(&hasDup))
+		opts = append(opts, lserver.WithDupIndicator(&hasDup))
 	}
 
 	err = l.core.RunOnceWithOptions(taskCtx, cfg, opts...)
@@ -329,16 +329,55 @@ func GetLightningConfig(globalCfg *lcfg.GlobalConfig, subtaskCfg *config.SubTask
 	if err := cfg.LoadFromGlobal(globalCfg); err != nil {
 		return nil, err
 	}
+	cfg.TiDB.Security = &globalCfg.Security
+	// TODO: avoid writing to local file. right now we don't know how to verify certificates correctly using TLS content in a short time, but we have a time schedule to keep.
+	// Workround is also need to set TLS path instead of only set TLS content.
+	// Write TLS content to file when loader using TLS content or set db security only.
+	if subtaskCfg.LoaderConfig.Security != nil {
+		// Only when ssl content is set and ssl file path is not set, the file will be written
+		if len(subtaskCfg.LoaderConfig.Security.SSLCABytes) != 0 && len(subtaskCfg.LoaderConfig.Security.SSLCertBytes) != 0 &&
+			len(subtaskCfg.LoaderConfig.Security.SSLKeyBytes) != 0 && subtaskCfg.LoaderConfig.Security.SSLCA == "" &&
+			subtaskCfg.LoaderConfig.Security.SSLCert == "" && subtaskCfg.LoaderConfig.Security.SSLKey == "" {
+			if err := subtaskCfg.LoaderConfig.Security.WriteTLSContentToFiles(subtaskCfg.Name); err != nil {
+				return nil, err
+			}
+		}
+		cfg.Security.CABytes = subtaskCfg.LoaderConfig.Security.SSLCABytes
+		cfg.Security.CertBytes = subtaskCfg.LoaderConfig.Security.SSLCertBytes
+		cfg.Security.KeyBytes = subtaskCfg.LoaderConfig.Security.SSLKeyBytes
+		cfg.Security.CAPath = subtaskCfg.LoaderConfig.Security.SSLCA
+		cfg.Security.CertPath = subtaskCfg.LoaderConfig.Security.SSLCert
+		cfg.Security.KeyPath = subtaskCfg.LoaderConfig.Security.SSLKey
+	} else if subtaskCfg.To.Security != nil {
+		// Only when ssl content is set and ssl file path is not set, the file will be written.
+		// Using db security as lightning default security config.
+		if len(subtaskCfg.To.Security.SSLCABytes) != 0 && len(subtaskCfg.To.Security.SSLCertBytes) != 0 && len(subtaskCfg.To.Security.SSLKeyBytes) != 0 &&
+			subtaskCfg.To.Security.SSLCA == "" && subtaskCfg.To.Security.SSLCert == "" && subtaskCfg.To.Security.SSLKey == "" {
+			if err := subtaskCfg.To.Security.WriteTLSContentToFiles(subtaskCfg.Name); err != nil {
+				return nil, err
+			}
+		}
+		cfg.Security.CABytes = subtaskCfg.To.Security.SSLCABytes
+		cfg.Security.CertBytes = subtaskCfg.To.Security.SSLCertBytes
+		cfg.Security.KeyBytes = subtaskCfg.To.Security.SSLKeyBytes
+		cfg.Security.CAPath = subtaskCfg.To.Security.SSLCA
+		cfg.Security.CertPath = subtaskCfg.To.Security.SSLCert
+		cfg.Security.KeyPath = subtaskCfg.To.Security.SSLKey
+	}
 	// TableConcurrency is adjusted to the value of RegionConcurrency
 	// when using TiDB backend.
 	// TODO: should we set the TableConcurrency separately.
 	cfg.App.RegionConcurrency = subtaskCfg.LoaderConfig.PoolSize
 	cfg.Routes = subtaskCfg.RouteRules
 
-	if subtaskCfg.ExtStorage != nil {
+	// Use MySQL checkpoint when we use s3/gcs as dumper storage
+	if subtaskCfg.ExtStorage != nil || !storage.IsLocalDiskPath(subtaskCfg.LoaderConfig.Dir) {
 		// NOTE: If we use bucket as dumper storage, write lightning checkpoint to downstream DB to avoid bucket ratelimit
 		// since we will use check Checkpoint in 'ignoreCheckpointError', MAKE SURE we have assigned the Checkpoint config properly here
 		if err := cfg.Security.BuildTLSConfig(); err != nil {
+			return nil, err
+		}
+		if err := cfg.TiDB.Security.BuildTLSConfig(); err != nil {
 			return nil, err
 		}
 		// To enable the loader worker failover, we need to use jobID+sourceID to isolate the checkpoint schema
@@ -365,15 +404,15 @@ func GetLightningConfig(globalCfg *lcfg.GlobalConfig, subtaskCfg *config.SubTask
 	}
 	if cfg.TikvImporter.Backend == lcfg.BackendLocal {
 		cfg.TikvImporter.IncrementalImport = true
-	} else {
-		cfg.TikvImporter.OnDuplicate = string(subtaskCfg.OnDuplicateLogical)
+	} else if err := cfg.TikvImporter.OnDuplicate.FromStringValue(string(subtaskCfg.OnDuplicateLogical)); err != nil {
+		return nil, err
 	}
 	switch subtaskCfg.OnDuplicatePhysical {
 	case config.OnDuplicateManual:
-		cfg.TikvImporter.DuplicateResolution = lcfg.DupeResAlgRemove
+		cfg.TikvImporter.DuplicateResolution = lcfg.ReplaceOnDup
 		cfg.App.TaskInfoSchemaName = GetTaskInfoSchemaName(subtaskCfg.MetaSchema, subtaskCfg.Name)
 	case config.OnDuplicateNone:
-		cfg.TikvImporter.DuplicateResolution = lcfg.DupeResAlgNone
+		cfg.TikvImporter.DuplicateResolution = lcfg.NoneOnDup
 	}
 	switch subtaskCfg.ChecksumPhysical {
 	case config.OpLevelRequired:
@@ -602,7 +641,7 @@ func (l *LightningLoader) Resume(ctx context.Context, pr chan pb.ProcessResult) 
 		l.logger.Warn("try to resume, but already closed")
 		return
 	}
-	l.core = lightning.New(l.lightningGlobalConfig)
+	l.core = lserver.New(l.lightningGlobalConfig)
 	// continue the processing
 	l.Process(ctx, pr)
 }
@@ -656,7 +695,7 @@ func connParamFromConfig(config *lcfg.Config) *common.MySQLConnectParam {
 		SQLMode:  mysql.DefaultSQLMode,
 		// TODO: keep same as Lightning defaultMaxAllowedPacket later
 		MaxAllowedPacket:         64 * 1024 * 1024,
-		TLSConfig:                config.Security.TLSConfig,
-		AllowFallbackToPlaintext: config.Security.AllowFallbackToPlaintext,
+		TLSConfig:                config.TiDB.Security.TLSConfig,
+		AllowFallbackToPlaintext: config.TiDB.Security.AllowFallbackToPlaintext,
 	}
 }

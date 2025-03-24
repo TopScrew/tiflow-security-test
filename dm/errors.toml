@@ -929,7 +929,7 @@ workaround = "Please check the `name` config in task configuration file."
 tags = ["internal", "medium"]
 
 [error.DM-config-20020]
-message = "please specify right task-mode, support `full`, `incremental`, `all`"
+message = "please specify right task-mode, support `full`, `incremental`, `all`, `dump`, `load`"
 description = ""
 workaround = "Please check the `task-mode` config in task configuration file."
 tags = ["internal", "medium"]
@@ -1209,6 +1209,12 @@ message = "cannot enable `strict-optimistic-shard-mode` while `shard-mode` is no
 description = ""
 workaround = "Please set `shard-mode` to `optimistic` if you want to enable `strict-optimistic-shard-mode`."
 tags = ["internal", "medium"]
+
+[error.DM-config-20067]
+message = "invalid secret key path or content: %v"
+description = ""
+workaround = "Please check whether the path is valid, and has required permission to read the file, and the key is correct."
+tags = ["internal", "high"]
 
 [error.DM-binlog-op-22001]
 message = ""

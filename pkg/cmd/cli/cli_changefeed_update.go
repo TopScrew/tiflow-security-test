@@ -17,12 +17,16 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/BurntSushi/toml"
+	"github.com/fatih/color"
+	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	v2 "github.com/pingcap/tiflow/cdc/api/v2"
 	apiv2client "github.com/pingcap/tiflow/pkg/api/v2"
 	cmdcontext "github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/factory"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
+	"github.com/pingcap/tiflow/pkg/config"
 	putil "github.com/pingcap/tiflow/pkg/util"
 	"github.com/r3labs/diff"
 	"github.com/spf13/cobra"
@@ -89,6 +93,25 @@ func (o *updateChangefeedOptions) complete(f factory.Factory) error {
 	return nil
 }
 
+// validate checks the provided values for the `cli changefeed update` command.
+func (o *updateChangefeedOptions) validate(cmd *cobra.Command) error {
+	if len(o.commonChangefeedOptions.configFile) > 0 {
+		cfg := config.GetDefaultReplicaConfig()
+		metaData, err := toml.DecodeFile(o.commonChangefeedOptions.configFile, cfg)
+		if err != nil {
+			return errors.Trace(err)
+		}
+
+		if metaData.IsDefined("sink", "enable-partition-separator") {
+			cmd.Println(color.HiYellowString("sink.enable-partition-separator is deprecated and will be removed in future versions. " +
+				"The default value for sink.enable-partition-separator is `true`. " +
+				"Changing it to `false` may lead to data inconsistency issues. " +
+				"Please update your configuration as needed."))
+		}
+	}
+	return nil
+}
+
 // run the `cli changefeed update` command.
 func (o *updateChangefeedOptions) run(cmd *cobra.Command) error {
 	ctx := cmdcontext.GetDefaultContext()
@@ -121,7 +144,7 @@ func (o *updateChangefeedOptions) run(cmd *cobra.Command) error {
 
 	if !o.commonChangefeedOptions.noConfirm {
 		cmd.Printf("Could you agree to apply changes above to changefeed [Y/N]\n")
-		confirmed := readInput(cmd)
+		confirmed := readYOrN(cmd)
 		if !confirmed {
 			cmd.Printf("No update to changefeed.\n")
 			return nil
@@ -198,6 +221,7 @@ func newCmdUpdateChangefeed(f factory.Factory) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			util.CheckErr(o.complete(f))
+			util.CheckErr(o.validate(cmd))
 			util.CheckErr(o.run(cmd))
 		},
 	}

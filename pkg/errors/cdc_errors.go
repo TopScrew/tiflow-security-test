@@ -54,6 +54,10 @@ var (
 		"cannot find mysql.tidb_ddl_job schema",
 		errors.RFCCodeText("CDC:ErrDDLSchemaNotFound"),
 	)
+	ErrDDLUnsupportType = errors.Normalize(
+		"unsupport ddl type %s, query %s",
+		errors.RFCCodeText("CDC:ErrDDLUnsupportType"),
+	)
 	ErrGRPCDialFailed = errors.Normalize(
 		"grpc dial failed",
 		errors.RFCCodeText("CDC:ErrGRPCDialFailed"),
@@ -113,7 +117,7 @@ var (
 
 	// codec related errors
 	ErrEncodeFailed = errors.Normalize(
-		"encode failed: %s",
+		"encode failed",
 		errors.RFCCodeText("CDC:ErrEncodeFailed"),
 	)
 	ErrDecodeFailed = errors.Normalize(
@@ -140,6 +144,17 @@ var (
 		"stop processor by admin command",
 		errors.RFCCodeText("CDC:ErrAdminStopProcessor"),
 	)
+	ErrCodeNilFunction = errors.Normalize(
+		"function is not initialized",
+		errors.RFCCodeText("CDC:ErrCodeNilFunction"),
+	)
+
+	// Errors caused by unexpected behavior from external systems
+	ErrTiDBUnexpectedJobMeta = errors.Normalize(
+		"unexpected `job_meta` from tidb",
+		errors.RFCCodeText("CDC:ErrTiDBUnexpectedJobMeta"),
+	)
+
 	// ErrVersionIncompatible is an error for running CDC on an incompatible Cluster.
 	ErrVersionIncompatible = errors.Normalize(
 		"version is incompatible: %s",
@@ -424,6 +439,18 @@ var (
 		"csv decode failed",
 		errors.RFCCodeText("CDC:ErrCSVDecodeFailed"),
 	)
+	ErrDebeziumEncodeFailed = errors.Normalize(
+		"debezium encode failed",
+		errors.RFCCodeText("CDC:ErrDebeziumEncodeFailed"),
+	)
+	ErrDebeziumInvalidMessage = errors.Normalize(
+		"debezium invalid message format, %s",
+		errors.RFCCodeText("CDC:ErrDebeziumInvalidMessage"),
+	)
+	ErrDebeziumEmptyValueMessage = errors.Normalize(
+		"debezium value should not be empty",
+		errors.RFCCodeText("CDC:ErrDebeziumEmptyValueMessage"),
+	)
 	ErrStorageSinkInvalidConfig = errors.Normalize(
 		"storage sink config invalid",
 		errors.RFCCodeText("CDC:ErrStorageSinkInvalidConfig"),
@@ -575,8 +602,7 @@ var (
 	)
 
 	ErrCorruptedDataMutation = errors.Normalize(
-		"Changefeed %s.%s stopped due to corrupted data mutation received. "+
-			"Corrupted mutation detail information %+v",
+		"Changefeed %s.%s stopped due to corrupted data mutation received",
 		errors.RFCCodeText("CDC:ErrCorruptedDataMutation"))
 
 	// server related errors
@@ -941,9 +967,13 @@ var (
 		"internal check failed, %s",
 		errors.RFCCodeText("CDC:ErrInternalCheckFailed"),
 	)
+	ErrSameUpstreamDownstream = errors.Normalize(
+		"upstream and downstream are the same, %s",
+		errors.RFCCodeText("CDC:ErrSameUpstreamDownstream"),
+	)
 
 	ErrHandleDDLFailed = errors.Normalize(
-		"handle ddl failed, job: %s, query: %s, startTs: %d. "+
+		"handle ddl failed, query: %s, startTs: %d. "+
 			"If you want to skip this DDL and continue with replication, "+
 			"you can manually execute this DDL downstream. Afterwards, "+
 			"add `ignore-txn-start-ts=[%d]` to the changefeed in the filter configuration.",
@@ -980,5 +1010,20 @@ var (
 	ErrInconsistentMetaCache = errors.Normalize(
 		"meta cache is inconsistent: %s",
 		errors.RFCCodeText("DFLOW:ErrInconsistentMetaCache"),
+	)
+
+	ErrUnexpected = errors.Normalize(
+		"cdc met unexpected error: %s",
+		errors.RFCCodeText("CDC:ErrUnexpected"),
+	)
+
+	// credential related errors
+	ErrCredentialNotFound = errors.Normalize(
+		"credential not found: %s",
+		errors.RFCCodeText("CDC:ErrCredentialNotFound"),
+	)
+	ErrUnauthorized = errors.Normalize(
+		"user %s unauthorized, error: %s",
+		errors.RFCCodeText("CDC:ErrUnauthorized"),
 	)
 )

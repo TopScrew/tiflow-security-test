@@ -24,6 +24,15 @@ function init_noshard_data() {
 	run_sql_source2 "INSERT INTO openapi.t2(i,j) VALUES (3, 4);"
 }
 
+function init_dump_data() {
+
+	run_sql_source1 "CREATE TABLE openapi.t1(i TINYINT, j INT UNIQUE KEY);"
+	run_sql_source1 "INSERT INTO openapi.t1(i,j) VALUES (1, 2),(3,4);"
+
+	run_sql_source1 "CREATE TABLE openapi.t2(i TINYINT, j INT UNIQUE KEY);"
+	run_sql_source1 "INSERT INTO openapi.t2(i,j) VALUES (1, 2),(3,4);"
+}
+
 function init_shard_data() {
 	run_sql_source1 "CREATE TABLE openapi.t(i TINYINT, j INT UNIQUE KEY);"
 	run_sql_source2 "CREATE TABLE openapi.t(i TINYINT, j INT UNIQUE KEY);"
@@ -176,6 +185,130 @@ function test_relay() {
 
 }
 
+function test_dump_and_load_task() {
+	echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>START TEST OPENAPI: dump & load TASK"
+	prepare_database
+
+	# create source successfully
+	openapi_source_check "create_source1_success"
+	# get source list success
+	openapi_source_check "list_source_success" 1
+
+	# create source successfully
+	openapi_source_check "create_source2_success"
+	# get source list success
+	openapi_source_check "list_source_success" 2
+
+	# get source status success
+	openapi_source_check "get_source_status_success" "mysql-01"
+
+	# create task success: not valid task create request
+	openapi_task_check "create_task_failed"
+
+	init_dump_data
+
+	dump_task_name="test-dump-1"
+	# create dump task from mysql without table filter success and valid stage is "Stopped"
+	openapi_task_check "create_dump_task_without_table_filter_success" $dump_task_name
+	run_dm_ctl_with_retry $WORK_DIR "127.0.0.1:$MASTER_PORT" \
+		"query-status $dump_task_name" \
+		"\"stage\": \"Stopped\"" 1
+	# start dump task success and wait dump task finish and delete dump task
+	openapi_task_check "start_task_success" $dump_task_name ""
+	run_dm_ctl_with_retry $WORK_DIR "127.0.0.1:$MASTER_PORT" \
+		"query-status $dump_task_name" 100 \
+		"\"stage\": \"Finished\"" 1
+
+	dump_task_name="test-dump-2"
+	# create dump task success and valid stage is "Stopped"
+	openapi_task_check "create_dump_task_success" $dump_task_name
+	run_dm_ctl_with_retry $WORK_DIR "127.0.0.1:$MASTER_PORT" \
+		"query-status $dump_task_name" \
+		"\"stage\": \"Stopped\"" 1
+
+	# start dump task success and wait dump task finish
+	openapi_task_check "start_task_success" $dump_task_name ""
+	run_dm_ctl_with_retry $WORK_DIR "127.0.0.1:$MASTER_PORT" \
+		"query-status $dump_task_name" 100 \
+		"\"stage\": \"Finished\"" 1
+	openapi_task_check "check_dump_task_finished_status_success" $dump_task_name 2 2 4 4 228
+
+	load_task_name="test-load"
+	# create load task success
+	openapi_task_check "create_load_task_success"
+	run_dm_ctl_with_retry $WORK_DIR "127.0.0.1:$MASTER_PORT" \
+		"query-status $load_task_name" \
+		"\"stage\": \"Stopped\"" 1
+
+	# use the data from the same dir of dump task
+
+	# start load task success
+	openapi_task_check "start_task_success" $load_task_name ""
+
+	# wait load task finish
+	run_dm_ctl_with_retry $WORK_DIR "127.0.0.1:$MASTER_PORT" \
+		"query-status $load_task_name" 100 \
+		"\"stage\": \"Finished\"" 1
+
+	check_sync_diff $WORK_DIR $cur/conf/diff_config_no_shard_one_source.toml
+
+	clean_cluster_sources_and_tasks
+	echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>TEST OPENAPI:  dump & load TASK"
+
+}
+
+function test_full_mode_task() {
+	echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>START TEST OPENAPI: FULL MODE TASK"
+	prepare_database
+
+	task_name="test-no-shard"
+	target_table_name=""
+
+	# create source successfully
+	openapi_source_check "create_source1_success"
+	openapi_source_check "list_source_success" 1
+
+	# get source status success
+	openapi_source_check "get_source_status_success" "mysql-01"
+
+	# create source successfully
+	openapi_source_check "create_source2_success"
+	# get source list success
+	openapi_source_check "list_source_success" 2
+
+	# get source status success
+	openapi_source_check "get_source_status_success" "mysql-02"
+
+	# create no shard task in full mode success
+	openapi_task_check "create_noshard_task_success" $task_name "" "full"
+	run_dm_ctl_with_retry $WORK_DIR "127.0.0.1:$MASTER_PORT" \
+		"query-status $task_name" \
+		"\"stage\": \"Stopped\"" 2
+	openapi_task_check "check_task_stage_success" $task_name 2 "Stopped"
+
+	init_noshard_data
+
+	# start task success
+	openapi_task_check "start_task_success" $task_name ""
+
+	# get task status and load task status
+	openapi_task_check "get_task_status_success" "$task_name" 2
+
+	# wait full task finish
+	run_dm_ctl_with_retry $WORK_DIR "127.0.0.1:$MASTER_PORT" \
+		"query-status $task_name" 100 \
+		"\"stage\": \"Finished\"" 2
+	openapi_task_check "check_task_stage_success" $task_name 2 "Finished"
+	check_sync_diff $WORK_DIR $cur/conf/diff_config_no_shard.toml
+
+	# check load task status
+	openapi_task_check "check_load_task_finished_status_success" "$task_name" 107 107
+
+	# delete source success and clean data for other test
+	clean_cluster_sources_and_tasks
+	echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>TEST OPENAPI: FULL MODE TASK"
+}
+
 function test_shard_task() {
 	echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>START TEST OPENAPI: SHARD TASK"
 	prepare_database
@@ -229,8 +362,9 @@ function test_shard_task() {
 	# get illegal char task_status failed
 	openapi_task_check get_illegal_char_task_status_failed
 
-	# get task status success
+	# get task status and check sync task status success
 	openapi_task_check "get_task_status_success" "$task_name" 2
+	openapi_task_check "check_sync_task_status_success" "$task_name" 3000 7000 19000 30000
 
 	# get task list
 	openapi_task_check "get_task_list" 1
@@ -290,8 +424,9 @@ function test_noshard_task() {
 	# get task status failed
 	openapi_task_check "get_task_status_failed" "not a task name"
 
-	# get task status success
+	# get task status and check sync task status success
 	openapi_task_check "get_task_status_success" "$task_name" 2
+	openapi_task_check "check_sync_task_status_success" "$task_name" 2500 5000 18000 42000
 
 	# delete source with force
 	openapi_source_check "delete_source_with_force_success" "mysql-01"
@@ -353,6 +488,7 @@ function test_complex_operations_of_source_and_task() {
 	init_noshard_data
 	check_sync_diff $WORK_DIR $cur/conf/diff_config_no_shard.toml
 	openapi_task_check "get_task_status_success" "$task_name" 2
+	openapi_task_check "check_sync_task_status_success" "$task_name" 2500 5000 18000 42000
 
 	# do some complex operations
 	openapi_task_check "do_complex_operations" "$task_name"
@@ -752,6 +888,7 @@ function test_start_task_with_condition() {
 	run_sql_source2 "CREATE TABLE openapi.t2(i TINYINT, j INT UNIQUE KEY);"
 
 	openapi_task_check "create_incremental_task_with_gtid_success" $task_name "" "" "" "" "" ""
+	curl http://127.0.0.1:8261/api/v1/tasks/incremental_task_use_start_time_after_create/sources/mysql-01/migrate_targets
 	run_dm_ctl_with_retry $WORK_DIR "127.0.0.1:$MASTER_PORT" \
 		"query-status $task_name" \
 		"\"stage\": \"Stopped\"" 2
@@ -943,6 +1080,71 @@ function test_stop_task_with_condition() {
 	echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>TEST OPENAPI: START TASK WITH CONDITION SUCCESS"
 }
 
+function test_tls() {
+	echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>START TEST OPENAPI: TLS"
+	prepare_database
+	init_noshard_data
+	# create source1 successfully
+	openapi_source_check "create_source1_success"
+	# create source2 successfully
+	openapi_source_check "create_source2_success"
+
+	echo "kill tidb and start downstream TiDB cluster with different TLS certificates"
+	killall -9 tidb-server 2>/dev/null || true
+	killall -9 tikv-server 2>/dev/null || true
+	killall -9 pd-server 2>/dev/null || true
+	run_downstream_cluster_with_tls $WORK_DIR $cur/tls_conf ca.pem dm.pem dm.key ca2.pem tidb.pem tidb.key
+
+	task_name="task-tls-1"
+	openapi_task_check "create_noshard_task_with_db_cluster_security_success" $task_name "" \
+		"$(cat $cur/tls_conf/ca2.pem)" "$(cat $cur/tls_conf/tidb.pem)" "$(cat $cur/tls_conf/tidb.key)" \
+		"$(cat $cur/tls_conf/ca.pem)" "$(cat $cur/tls_conf/dm.pem)" "$(cat $cur/tls_conf/dm.key)"
+	openapi_task_check "start_task_success" $task_name ""
+	openapi_task_check "get_task_status_success" $task_name 2
+	openapi_task_check "get_task_status_success_with_retry" $task_name "Sync" "Running" 50
+
+	check_sync_diff $WORK_DIR $cur/conf/diff_config_no_shard.toml
+
+	echo "kill tidb and start downstream TiDB cluster with same TLS certificates"
+	killall -9 tidb-server 2>/dev/null || true
+	killall -9 tikv-server 2>/dev/null || true
+	killall -9 pd-server 2>/dev/null || true
+	run_downstream_cluster_with_tls $WORK_DIR $cur/tls_conf ca2.pem tidb.pem tidb.key ca2.pem tidb.pem tidb.key
+
+	task_name="task-tls-2"
+	openapi_task_check "create_noshard_task_with_db_security_success" $task_name "" \
+		"$(cat $cur/tls_conf/ca2.pem)" "$(cat $cur/tls_conf/tidb.pem)" "$(cat $cur/tls_conf/tidb.key)"
+	openapi_task_check "start_task_success" $task_name ""
+	openapi_task_check "get_task_status_success" $task_name 2
+	openapi_task_check "get_task_status_success_with_retry" $task_name "Sync" "Running" 50
+
+	check_sync_diff $WORK_DIR $cur/conf/diff_config_no_shard.toml
+
+	task_name="task-tls-error"
+	# miss cert and key certificate
+	openapi_task_check "create_noshard_task_with_security_failed" $task_name \
+		"$(cat $cur/tls_conf/ca2.pem)" "" "" \
+		"$(cat $cur/tls_conf/ca.pem)" "" ""
+	# miss tidb cert certificate
+	openapi_task_check "create_noshard_task_with_security_failed" $task_name \
+		"$(cat $cur/tls_conf/ca2.pem)" "" "$(cat $cur/tls_conf/tidb.key)" \
+		"$(cat $cur/tls_conf/ca.pem)" "$(cat $cur/tls_conf/dm.pem)" "$(cat $cur/tls_conf/dm.key)"
+	# miss pd key certificate
+	openapi_task_check "create_noshard_task_with_security_failed" $task_name \
+		"$(cat $cur/tls_conf/ca2.pem)" "$(cat $cur/tls_conf/tidb.pem)" "$(cat $cur/tls_conf/tidb.key)" \
+		"$(cat $cur/tls_conf/ca.pem)" "$(cat $cur/tls_conf/dm.pem)" ""
+	# miss pd all certificate
+	openapi_task_check "create_noshard_task_with_security_failed" $task_name \
+		"$(cat $cur/tls_conf/ca2.pem)" "$(cat $cur/tls_conf/tidb.pem)" "$(cat $cur/tls_conf/tidb.key)" \
+		"" "" ""
+
+	killall -9 tidb-server 2>/dev/null || true
+	killall -9 tikv-server 2>/dev/null || true
+	killall -9 pd-server 2>/dev/null || true
+	run_tidb_server 4000 $TIDB_PASSWORD
+	echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>TEST OPENAPI: TLS SUCCESS"
+}
+
 function test_reverse_https() {
 	echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>START TEST OPENAPI: REVERSE HTTPS"
 	cleanup_data openapi
@@ -1039,6 +1241,7 @@ function run() {
 	test_shard_task
 	test_multi_tasks
 	test_noshard_task
+	test_dump_and_load_task
 	test_task_templates
 	test_noshard_task_dump_status
 	test_complex_operations_of_source_and_task
@@ -1047,6 +1250,8 @@ function run() {
 	test_start_task_with_condition
 	test_stop_task_with_condition
 	test_reverse_https
+	test_full_mode_task
+	test_tls
 
 	# NOTE: this test case MUST running at last, because it will offline some members of cluster
 	test_cluster

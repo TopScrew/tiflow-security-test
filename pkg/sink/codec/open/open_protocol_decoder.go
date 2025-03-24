@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
@@ -47,6 +48,8 @@ type BatchDecoder struct {
 	config *common.Config
 
 	upstreamTiDB *sql.DB
+
+	tableIDAllocator *common.FakeTableIDAllocator
 }
 
 // NewBatchDecoder creates a new BatchDecoder.
@@ -57,7 +60,7 @@ func NewBatchDecoder(ctx context.Context, config *common.Config, db *sql.DB) (co
 	)
 	if config.LargeMessageHandle.EnableClaimCheck() {
 		storageURI := config.LargeMessageHandle.ClaimCheckStorageURI
-		externalStorage, err = util.GetExternalStorageFromURI(ctx, storageURI)
+		externalStorage, err = util.GetExternalStorage(ctx, storageURI, nil, util.NewS3Retryer(10, 10*time.Second, 10*time.Second))
 		if err != nil {
 			return nil, cerror.WrapError(cerror.ErrKafkaInvalidConfig, err)
 		}
@@ -69,9 +72,10 @@ func NewBatchDecoder(ctx context.Context, config *common.Config, db *sql.DB) (co
 	}
 
 	return &BatchDecoder{
-		config:       config,
-		storage:      externalStorage,
-		upstreamTiDB: db,
+		config:           config,
+		storage:          externalStorage,
+		upstreamTiDB:     db,
+		tableIDAllocator: common.NewFakeTableIDAllocator(),
 	}, nil
 }
 
@@ -145,11 +149,10 @@ func (b *BatchDecoder) HasNext() (model.MessageType, bool, error) {
 			return model.MessageTypeUnknown, false, cerror.ErrOpenProtocolCodecInvalidData.
 				GenWithStack("decompress data failed")
 		}
-
-		if err := rowMsg.decode(value); err != nil {
+		if err = rowMsg.decode(value); err != nil {
 			return b.nextKey.Type, false, errors.Trace(err)
 		}
-		b.nextEvent = msgToRowChange(b.nextKey, rowMsg)
+		b.nextEvent = b.msgToRowChange(b.nextKey, rowMsg)
 	}
 
 	return b.nextKey.Type, true, nil
@@ -183,7 +186,7 @@ func (b *BatchDecoder) NextDDLEvent() (*model.DDLEvent, error) {
 	}
 
 	ddlMsg := new(messageDDL)
-	if err := ddlMsg.decode(value); err != nil {
+	if err = ddlMsg.decode(value); err != nil {
 		return nil, errors.Trace(err)
 	}
 	ddlEvent := msgToDDLEvent(b.nextKey, ddlMsg)
@@ -207,11 +210,7 @@ func (b *BatchDecoder) NextRowChangedEvent() (*model.RowChangedEvent, error) {
 
 	event := b.nextEvent
 	if b.nextKey.OnlyHandleKey {
-		var err error
 		event = b.assembleHandleKeyOnlyEvent(ctx, event)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
 	}
 
 	b.nextKey = nil
@@ -256,47 +255,54 @@ func (b *BatchDecoder) assembleHandleKeyOnlyEvent(
 	ctx context.Context, handleKeyOnlyEvent *model.RowChangedEvent,
 ) *model.RowChangedEvent {
 	var (
-		schema   = handleKeyOnlyEvent.Table.Schema
-		table    = handleKeyOnlyEvent.Table.Table
+		schema   = handleKeyOnlyEvent.TableInfo.GetSchemaName()
+		table    = handleKeyOnlyEvent.TableInfo.GetTableName()
 		commitTs = handleKeyOnlyEvent.CommitTs
 	)
 
+	tableInfo := handleKeyOnlyEvent.TableInfo
 	if handleKeyOnlyEvent.IsInsert() {
 		conditions := make(map[string]interface{}, len(handleKeyOnlyEvent.Columns))
 		for _, col := range handleKeyOnlyEvent.Columns {
-			conditions[col.Name] = col.Value
+			colName := tableInfo.ForceGetColumnName(col.ColumnID)
+			conditions[colName] = col.Value
 		}
 		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs, schema, table, conditions)
-
 		columns := b.buildColumns(holder, conditions)
-		handleKeyOnlyEvent.Columns = columns
+		indexColumns := model.GetHandleAndUniqueIndexOffsets4Test(columns)
+		handleKeyOnlyEvent.TableInfo = model.BuildTableInfo(schema, table, columns, indexColumns)
+		handleKeyOnlyEvent.Columns = model.Columns2ColumnDatas(columns, handleKeyOnlyEvent.TableInfo)
 	} else if handleKeyOnlyEvent.IsDelete() {
 		conditions := make(map[string]interface{}, len(handleKeyOnlyEvent.PreColumns))
 		for _, col := range handleKeyOnlyEvent.PreColumns {
-			conditions[col.Name] = col.Value
+			colName := tableInfo.ForceGetColumnName(col.ColumnID)
+			conditions[colName] = col.Value
 		}
 		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs-1, schema, table, conditions)
-
 		preColumns := b.buildColumns(holder, conditions)
-		handleKeyOnlyEvent.PreColumns = preColumns
+		indexColumns := model.GetHandleAndUniqueIndexOffsets4Test(preColumns)
+		handleKeyOnlyEvent.TableInfo = model.BuildTableInfo(schema, table, preColumns, indexColumns)
+		handleKeyOnlyEvent.PreColumns = model.Columns2ColumnDatas(preColumns, handleKeyOnlyEvent.TableInfo)
 	} else if handleKeyOnlyEvent.IsUpdate() {
 		conditions := make(map[string]interface{}, len(handleKeyOnlyEvent.Columns))
 		for _, col := range handleKeyOnlyEvent.Columns {
-			conditions[col.Name] = col.Value
+			colName := tableInfo.ForceGetColumnName(col.ColumnID)
+			conditions[colName] = col.Value
 		}
 		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs, schema, table, conditions)
-
 		columns := b.buildColumns(holder, conditions)
-		handleKeyOnlyEvent.Columns = columns
+		indexColumns := model.GetHandleAndUniqueIndexOffsets4Test(columns)
+		handleKeyOnlyEvent.TableInfo = model.BuildTableInfo(schema, table, columns, indexColumns)
+		handleKeyOnlyEvent.Columns = model.Columns2ColumnDatas(columns, handleKeyOnlyEvent.TableInfo)
 
 		conditions = make(map[string]interface{}, len(handleKeyOnlyEvent.PreColumns))
 		for _, col := range handleKeyOnlyEvent.PreColumns {
-			conditions[col.Name] = col.Value
+			colName := tableInfo.ForceGetColumnName(col.ColumnID)
+			conditions[colName] = col.Value
 		}
 		holder = common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs-1, schema, table, conditions)
-
 		preColumns := b.buildColumns(holder, conditions)
-		handleKeyOnlyEvent.PreColumns = preColumns
+		handleKeyOnlyEvent.PreColumns = model.Columns2ColumnDatas(preColumns, handleKeyOnlyEvent.TableInfo)
 	}
 
 	return handleKeyOnlyEvent
@@ -340,7 +346,7 @@ func (b *BatchDecoder) assembleEventFromClaimCheckStorage(ctx context.Context) (
 		return nil, errors.Trace(err)
 	}
 
-	event := msgToRowChange(msgKey, rowMsg)
+	event := b.msgToRowChange(msgKey, rowMsg)
 
 	return event, nil
 }

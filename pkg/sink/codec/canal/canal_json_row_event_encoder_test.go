@@ -19,17 +19,15 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/rowcodec"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/compression"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
+	"github.com/pingcap/tiflow/pkg/sink/codec/utils"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/text/encoding/charmap"
 )
 
 func TestBuildCanalJSONRowEventEncoder(t *testing.T) {
@@ -43,159 +41,115 @@ func TestBuildCanalJSONRowEventEncoder(t *testing.T) {
 	require.NotNil(t, encoder.config)
 }
 
-func TestNewCanalJSONMessage4DML(t *testing.T) {
-	t.Parallel()
+func TestDMLE2E(t *testing.T) {
+	createTableDDLEvent, insertEvent, updateEvent, deleteEvent := utils.NewLargeEvent4Test(t, config.GetDefaultReplicaConfig())
 
 	ctx := context.Background()
 	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
-	builder, err := NewJSONRowEventEncoderBuilder(ctx, codecConfig)
-	require.NoError(t, err)
+	for _, enableTiDBExtension := range []bool{false, true} {
+		codecConfig.EnableTiDBExtension = enableTiDBExtension
+		builder, err := NewJSONRowEventEncoderBuilder(ctx, codecConfig)
+		require.NoError(t, err)
+		encoder := builder.Build()
 
-	encoder, ok := builder.Build().(*JSONRowEventEncoder)
-	require.True(t, ok)
+		decoder, err := NewBatchDecoder(ctx, codecConfig, nil)
+		require.NoError(t, err)
 
-	data, err := newJSONMessageForDML(encoder.builder, testCaseInsert, encoder.config, false, "")
-	require.NoError(t, err)
+		message, err := encoder.EncodeDDLEvent(createTableDDLEvent)
+		require.NoError(t, err)
 
-	var msg canalJSONMessageInterface = &JSONMessage{}
-	err = json.Unmarshal(data, msg)
-	require.NoError(t, err)
+		err = decoder.AddKeyValue(message.Key, message.Value)
+		require.NoError(t, err)
 
-	jsonMsg, ok := msg.(*JSONMessage)
-	require.True(t, ok)
-	require.NotNil(t, jsonMsg.Data)
-	require.Nil(t, jsonMsg.Old)
-	require.Equal(t, "INSERT", jsonMsg.EventType)
-	require.Equal(t, convertToCanalTs(testCaseInsert.CommitTs), jsonMsg.ExecutionTime)
-	require.Equal(t, "cdc", jsonMsg.Schema)
-	require.Equal(t, "person", jsonMsg.Table)
-	require.False(t, jsonMsg.IsDDL)
+		messageType, hasNext, err := decoder.HasNext()
+		require.NoError(t, err)
+		require.True(t, hasNext)
+		require.Equal(t, messageType, model.MessageTypeDDL)
 
-	for _, col := range testCaseInsert.Columns {
-		require.Contains(t, jsonMsg.Data[0], col.Name)
-		require.Contains(t, jsonMsg.SQLType, col.Name)
-		require.Contains(t, jsonMsg.MySQLType, col.Name)
-	}
+		decodedDDL, err := decoder.NextDDLEvent()
+		require.NoError(t, err)
+		if enableTiDBExtension {
+			require.Equal(t, createTableDDLEvent.CommitTs, decodedDDL.CommitTs)
+		}
+		require.Equal(t, createTableDDLEvent.Query, decodedDDL.Query)
 
-	// check data is enough
-	obtainedDataMap := jsonMsg.getData()
-	require.NotNil(t, obtainedDataMap)
+		err = encoder.AppendRowChangedEvent(ctx, "", insertEvent, func() {})
+		require.NoError(t, err)
 
-	for _, item := range testColumnsTable {
-		obtainedValue, ok := obtainedDataMap[item.column.Name]
-		require.True(t, ok)
-		if !item.column.Flag.IsBinary() {
-			require.Equal(t, item.expectedEncodedValue, obtainedValue)
-			continue
+		message = encoder.Build()[0]
+		err = decoder.AddKeyValue(message.Key, message.Value)
+		require.NoError(t, err)
+
+		messageType, hasNext, err = decoder.HasNext()
+		require.NoError(t, err)
+		require.True(t, hasNext)
+		require.Equal(t, messageType, model.MessageTypeRow)
+
+		decodedEvent, err := decoder.NextRowChangedEvent()
+		require.NoError(t, err)
+
+		require.True(t, decodedEvent.IsInsert())
+		if enableTiDBExtension {
+			require.Equal(t, insertEvent.GetCommitTs(), decodedEvent.GetCommitTs())
+		}
+		require.NotZero(t, decodedEvent.GetTableID())
+		require.Equal(t, insertEvent.TableInfo.GetSchemaName(), decodedEvent.TableInfo.GetSchemaName())
+		require.Equal(t, insertEvent.TableInfo.GetTableName(), decodedEvent.TableInfo.GetTableName())
+
+		decodedColumns := make(map[string]*model.ColumnData, len(decodedEvent.Columns))
+		for _, column := range decodedEvent.Columns {
+			colName := decodedEvent.TableInfo.ForceGetColumnName(column.ColumnID)
+			decodedColumns[colName] = column
+		}
+		for _, col := range insertEvent.Columns {
+			colName := insertEvent.TableInfo.ForceGetColumnName(col.ColumnID)
+			decoded, ok := decodedColumns[colName]
+			require.True(t, ok)
+			switch v := col.Value.(type) {
+			case types.VectorFloat32:
+				require.EqualValues(t, v.String(), decoded.Value)
+			default:
+				require.EqualValues(t, v, decoded.Value)
+			}
 		}
 
-		// for `Column.Value` is nil, which mean's it is nullable, set the value to `""`
-		if obtainedValue == nil {
-			require.Equal(t, "", item.expectedEncodedValue)
-			continue
-		}
+		err = encoder.AppendRowChangedEvent(ctx, "", updateEvent, func() {})
+		require.NoError(t, err)
 
-		if bytes, ok := item.column.Value.([]byte); ok {
-			expectedValue, err := charmap.ISO8859_1.NewDecoder().Bytes(bytes)
-			require.NoError(t, err)
-			require.Equal(t, string(expectedValue), obtainedValue)
-			continue
-		}
+		message = encoder.Build()[0]
 
-		require.Equal(t, item.expectedEncodedValue, obtainedValue)
+		err = decoder.AddKeyValue(message.Key, message.Value)
+		require.NoError(t, err)
+
+		messageType, hasNext, err = decoder.HasNext()
+		require.NoError(t, err)
+		require.True(t, hasNext)
+		require.EqualValues(t, messageType, model.MessageTypeRow)
+
+		decodedEvent, err = decoder.NextRowChangedEvent()
+		require.NoError(t, err)
+		require.True(t, decodedEvent.IsUpdate())
+
+		err = encoder.AppendRowChangedEvent(ctx, "", deleteEvent, func() {})
+		require.NoError(t, err)
+
+		message = encoder.Build()[0]
+		err = decoder.AddKeyValue(message.Key, message.Value)
+		require.NoError(t, err)
+
+		messageType, hasNext, err = decoder.HasNext()
+		require.NoError(t, err)
+		require.True(t, hasNext)
+		require.EqualValues(t, messageType, model.MessageTypeRow)
+
+		decodedEvent, err = decoder.NextRowChangedEvent()
+		require.NoError(t, err)
+		require.True(t, decodedEvent.IsDelete())
 	}
-
-	data, err = newJSONMessageForDML(encoder.builder, testCaseUpdate, encoder.config, false, "")
-	require.NoError(t, err)
-
-	jsonMsg = &JSONMessage{}
-	err = json.Unmarshal(data, jsonMsg)
-	require.NoError(t, err)
-
-	require.NotNil(t, jsonMsg.Data)
-	require.NotNil(t, jsonMsg.Old)
-	require.Equal(t, "UPDATE", jsonMsg.EventType)
-
-	for _, col := range testCaseUpdate.Columns {
-		require.Contains(t, jsonMsg.Data[0], col.Name)
-		require.Contains(t, jsonMsg.SQLType, col.Name)
-		require.Contains(t, jsonMsg.MySQLType, col.Name)
-	}
-	for _, col := range testCaseUpdate.PreColumns {
-		require.Contains(t, jsonMsg.Old[0], col.Name)
-	}
-
-	data, err = newJSONMessageForDML(encoder.builder, testCaseDelete, encoder.config, false, "")
-	require.NoError(t, err)
-
-	jsonMsg = &JSONMessage{}
-	err = json.Unmarshal(data, jsonMsg)
-	require.NoError(t, err)
-	require.NotNil(t, jsonMsg.Data)
-	require.Nil(t, jsonMsg.Old)
-	require.Equal(t, "DELETE", jsonMsg.EventType)
-
-	for _, col := range testCaseDelete.PreColumns {
-		require.Contains(t, jsonMsg.Data[0], col.Name)
-	}
-
-	codecConfig = &common.Config{DeleteOnlyHandleKeyColumns: true}
-	data, err = newJSONMessageForDML(encoder.builder, testCaseDelete, codecConfig, false, "")
-	require.NoError(t, err)
-
-	jsonMsg = &JSONMessage{}
-	err = json.Unmarshal(data, jsonMsg)
-	require.NoError(t, err)
-	require.NotNil(t, jsonMsg.Data)
-	require.Nil(t, jsonMsg.Old)
-
-	for _, col := range testCaseDelete.PreColumns {
-		if col.Flag.IsHandleKey() {
-			require.Contains(t, jsonMsg.Data[0], col.Name)
-			require.Contains(t, jsonMsg.SQLType, col.Name)
-			require.Contains(t, jsonMsg.MySQLType, col.Name)
-		} else {
-			require.NotContains(t, jsonMsg.Data[0], col.Name)
-			require.NotContains(t, jsonMsg.SQLType, col.Name)
-			require.NotContains(t, jsonMsg.MySQLType, col.Name)
-		}
-	}
-
-	codecConfig = common.NewConfig(config.ProtocolCanalJSON)
-	codecConfig.EnableTiDBExtension = true
-	codecConfig.OnlyOutputUpdatedColumns = true
-
-	builder, err = NewJSONRowEventEncoderBuilder(ctx, codecConfig)
-	require.NoError(t, err)
-
-	encoder, ok = builder.Build().(*JSONRowEventEncoder)
-	require.True(t, ok)
-	data, err = newJSONMessageForDML(encoder.builder, testCaseUpdate, encoder.config, false, "")
-	require.NoError(t, err)
-
-	withExtension := &canalJSONMessageWithTiDBExtension{}
-	err = json.Unmarshal(data, withExtension)
-	require.NoError(t, err)
-
-	require.NotNil(t, withExtension.Extensions)
-	require.Equal(t, testCaseUpdate.CommitTs, withExtension.Extensions.CommitTs)
-
-	encoder, ok = builder.Build().(*JSONRowEventEncoder)
-	require.True(t, ok)
-	data, err = newJSONMessageForDML(encoder.builder, testCaseUpdate, encoder.config, false, "")
-	require.NoError(t, err)
-
-	withExtension = &canalJSONMessageWithTiDBExtension{}
-	err = json.Unmarshal(data, withExtension)
-	require.NoError(t, err)
-	require.Equal(t, 0, len(withExtension.JSONMessage.Old[0]))
-
-	require.NotNil(t, withExtension.Extensions)
-	require.Equal(t, testCaseUpdate.CommitTs, withExtension.Extensions.CommitTs)
 }
 
 func TestCanalJSONCompressionE2E(t *testing.T) {
-	t.Parallel()
+	_, insertEvent, _, _ := utils.NewLargeEvent4Test(t, config.GetDefaultReplicaConfig())
 
 	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
 	codecConfig.EnableTiDBExtension = true
@@ -207,7 +161,7 @@ func TestCanalJSONCompressionE2E(t *testing.T) {
 	encoder := builder.Build()
 
 	// encode normal row changed event
-	err = encoder.AppendRowChangedEvent(ctx, "", testCaseInsert, func() {})
+	err = encoder.AppendRowChangedEvent(ctx, "", insertEvent, func() {})
 	require.NoError(t, err)
 
 	message := encoder.Build()[0]
@@ -225,12 +179,18 @@ func TestCanalJSONCompressionE2E(t *testing.T) {
 
 	decodedEvent, err := decoder.NextRowChangedEvent()
 	require.NoError(t, err)
-	require.Equal(t, decodedEvent.CommitTs, testCaseInsert.CommitTs)
-	require.Equal(t, decodedEvent.Table.Schema, testCaseInsert.Table.Schema)
-	require.Equal(t, decodedEvent.Table.Table, testCaseInsert.Table.Table)
+	require.Equal(t, decodedEvent.CommitTs, insertEvent.CommitTs)
+	require.Equal(t, decodedEvent.TableInfo.GetSchemaName(), insertEvent.TableInfo.GetSchemaName())
+	require.Equal(t, decodedEvent.TableInfo.GetTableName(), insertEvent.TableInfo.GetTableName())
 
 	// encode DDL event
-	message, err = encoder.EncodeDDLEvent(testCaseDDL)
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	sql := `create table test.person(id int, name varchar(32), tiny tinyint unsigned, comment text, primary key(id))`
+	ddlEvent := helper.DDL2Event(sql)
+
+	message, err = encoder.EncodeDDLEvent(ddlEvent)
 	require.NoError(t, err)
 
 	err = decoder.AddKeyValue(message.Key, message.Value)
@@ -244,10 +204,10 @@ func TestCanalJSONCompressionE2E(t *testing.T) {
 	decodedDDL, err := decoder.NextDDLEvent()
 	require.NoError(t, err)
 
-	require.Equal(t, decodedDDL.Query, testCaseDDL.Query)
-	require.Equal(t, decodedDDL.CommitTs, testCaseDDL.CommitTs)
-	require.Equal(t, decodedDDL.TableInfo.TableName.Schema, testCaseDDL.TableInfo.TableName.Schema)
-	require.Equal(t, decodedDDL.TableInfo.TableName.Table, testCaseDDL.TableInfo.TableName.Table)
+	require.Equal(t, decodedDDL.Query, ddlEvent.Query)
+	require.Equal(t, decodedDDL.CommitTs, ddlEvent.CommitTs)
+	require.Equal(t, decodedDDL.TableInfo.TableName.Schema, ddlEvent.TableInfo.TableName.Schema)
+	require.Equal(t, decodedDDL.TableInfo.TableName.Table, ddlEvent.TableInfo.TableName.Table)
 
 	// encode checkpoint event
 	waterMark := uint64(2333)
@@ -268,8 +228,6 @@ func TestCanalJSONCompressionE2E(t *testing.T) {
 }
 
 func TestCanalJSONClaimCheckE2E(t *testing.T) {
-	t.Parallel()
-
 	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
 	codecConfig.EnableTiDBExtension = true
 	codecConfig.LargeMessageHandle.LargeMessageHandleOption = config.LargeMessageHandleOptionClaimCheck
@@ -278,51 +236,59 @@ func TestCanalJSONClaimCheckE2E(t *testing.T) {
 	codecConfig.MaxMessageBytes = 500
 	ctx := context.Background()
 
-	builder, err := NewJSONRowEventEncoderBuilder(ctx, codecConfig)
-	require.NoError(t, err)
-	encoder := builder.Build()
+	for _, rawValue := range []bool{false, true} {
+		codecConfig.LargeMessageHandle.ClaimCheckRawValue = rawValue
 
-	err = encoder.AppendRowChangedEvent(ctx, "", testCaseInsert, func() {})
-	require.NoError(t, err)
+		builder, err := NewJSONRowEventEncoderBuilder(ctx, codecConfig)
+		require.NoError(t, err)
+		encoder := builder.Build()
 
-	// this is a large message, should be delivered to the external storage.
-	claimCheckLocationMessage := encoder.Build()[0]
+		_, insertEvent, _, _ := utils.NewLargeEvent4Test(t, config.GetDefaultReplicaConfig())
+		err = encoder.AppendRowChangedEvent(ctx, "", insertEvent, func() {})
+		require.NoError(t, err)
 
-	decoder, err := NewBatchDecoder(ctx, codecConfig, nil)
-	require.NoError(t, err)
+		// this is a large message, should be delivered to the external storage.
+		claimCheckLocationMessage := encoder.Build()[0]
 
-	err = decoder.AddKeyValue(claimCheckLocationMessage.Key, claimCheckLocationMessage.Value)
-	require.NoError(t, err)
+		decoder, err := NewBatchDecoder(ctx, codecConfig, nil)
+		require.NoError(t, err)
 
-	messageType, ok, err := decoder.HasNext()
-	require.NoError(t, err)
-	require.Equal(t, messageType, model.MessageTypeRow)
-	require.True(t, ok)
+		err = decoder.AddKeyValue(claimCheckLocationMessage.Key, claimCheckLocationMessage.Value)
+		require.NoError(t, err)
 
-	decodedLargeEvent, err := decoder.NextRowChangedEvent()
-	require.NoError(t, err)
-
-	require.Equal(t, testCaseInsert.CommitTs, decodedLargeEvent.CommitTs)
-	require.Equal(t, testCaseInsert.Table, decodedLargeEvent.Table)
-	require.Equal(t, testCaseInsert.PreColumns, decodedLargeEvent.PreColumns)
-
-	decodedColumns := make(map[string]*model.Column, len(decodedLargeEvent.Columns))
-	for _, column := range decodedLargeEvent.Columns {
-		decodedColumns[column.Name] = column
-	}
-
-	expectedValue := collectExpectedDecodedValue(testColumnsTable)
-	for _, column := range testCaseInsert.Columns {
-		decodedColumn, ok := decodedColumns[column.Name]
+		messageType, ok, err := decoder.HasNext()
+		require.NoError(t, err)
+		require.Equal(t, messageType, model.MessageTypeRow)
 		require.True(t, ok)
-		require.Equal(t, column.Type, decodedColumn.Type)
-		require.Equal(t, expectedValue[column.Name], decodedColumn.Value)
+
+		decodedLargeEvent, err := decoder.NextRowChangedEvent()
+		require.NoError(t, err, rawValue)
+
+		require.Equal(t, insertEvent.CommitTs, decodedLargeEvent.CommitTs)
+		require.Equal(t, insertEvent.TableInfo.GetSchemaName(), decodedLargeEvent.TableInfo.GetSchemaName())
+		require.Equal(t, insertEvent.TableInfo.GetTableName(), decodedLargeEvent.TableInfo.GetTableName())
+		require.Nil(t, nil, decodedLargeEvent.PreColumns)
+
+		decodedColumns := make(map[string]*model.ColumnData, len(decodedLargeEvent.Columns))
+		for _, column := range decodedLargeEvent.Columns {
+			colName := decodedLargeEvent.TableInfo.ForceGetColumnName(column.ColumnID)
+			decodedColumns[colName] = column
+		}
+		for _, col := range insertEvent.Columns {
+			colName := insertEvent.TableInfo.ForceGetColumnName(col.ColumnID)
+			decoded, ok := decodedColumns[colName]
+			require.True(t, ok)
+			switch v := col.Value.(type) {
+			case types.VectorFloat32:
+				require.EqualValues(t, v.String(), decoded.Value)
+			default:
+				require.EqualValues(t, v, decoded.Value)
+			}
+		}
 	}
 }
 
 func TestNewCanalJSONMessageHandleKeyOnly4LargeMessage(t *testing.T) {
-	t.Parallel()
-
 	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
 	codecConfig.EnableTiDBExtension = true
 	codecConfig.LargeMessageHandle.LargeMessageHandleOption = config.LargeMessageHandleOptionHandleKeyOnly
@@ -335,7 +301,8 @@ func TestNewCanalJSONMessageHandleKeyOnly4LargeMessage(t *testing.T) {
 	require.NoError(t, err)
 	encoder := builder.Build()
 
-	err = encoder.AppendRowChangedEvent(context.Background(), "", testCaseInsert, func() {})
+	_, insertEvent, _, _ := utils.NewLargeEvent4Test(t, config.GetDefaultReplicaConfig())
+	err = encoder.AppendRowChangedEvent(context.Background(), "", insertEvent, func() {})
 	require.NoError(t, err)
 
 	message := encoder.Build()[0]
@@ -354,21 +321,23 @@ func TestNewCanalJSONMessageHandleKeyOnly4LargeMessage(t *testing.T) {
 	handleKeyOnlyMessage := decoder.(*batchDecoder).msg.(*canalJSONMessageWithTiDBExtension)
 	require.True(t, handleKeyOnlyMessage.Extensions.OnlyHandleKey)
 
-	for _, col := range testCaseInsert.Columns {
-		if col.Flag.IsHandleKey() {
-			require.Contains(t, handleKeyOnlyMessage.Data[0], col.Name)
-			require.Contains(t, handleKeyOnlyMessage.SQLType, col.Name)
-			require.Contains(t, handleKeyOnlyMessage.MySQLType, col.Name)
+	for _, col := range insertEvent.Columns {
+		colName := insertEvent.TableInfo.ForceGetColumnName(col.ColumnID)
+		if insertEvent.TableInfo.ForceGetColumnFlagType(col.ColumnID).IsHandleKey() {
+			require.Contains(t, handleKeyOnlyMessage.Data[0], colName)
+			require.Contains(t, handleKeyOnlyMessage.SQLType, colName)
+			require.Contains(t, handleKeyOnlyMessage.MySQLType, colName)
 		} else {
-			require.NotContains(t, handleKeyOnlyMessage.Data[0], col.Name)
-			require.NotContains(t, handleKeyOnlyMessage.SQLType, col.Name)
-			require.NotContains(t, handleKeyOnlyMessage.MySQLType, col.Name)
+			require.NotContains(t, handleKeyOnlyMessage.Data[0], colName)
+			require.NotContains(t, handleKeyOnlyMessage.SQLType, colName)
+			require.NotContains(t, handleKeyOnlyMessage.MySQLType, colName)
 		}
 	}
 }
 
 func TestNewCanalJSONMessageFromDDL(t *testing.T) {
-	t.Parallel()
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
 
 	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
 	ctx := context.Background()
@@ -377,16 +346,19 @@ func TestNewCanalJSONMessageFromDDL(t *testing.T) {
 	require.NoError(t, err)
 	encoder := builder.Build().(*JSONRowEventEncoder)
 
-	message := encoder.newJSONMessageForDDL(testCaseDDL)
+	sql := `create table test.person(id int, name varchar(32), tiny tinyint unsigned, comment text, primary key(id))`
+	ddlEvent := helper.DDL2Event(sql)
+
+	message := encoder.newJSONMessageForDDL(ddlEvent)
 	require.NotNil(t, message)
 
 	msg, ok := message.(*JSONMessage)
 	require.True(t, ok)
-	require.Equal(t, convertToCanalTs(testCaseDDL.CommitTs), msg.ExecutionTime)
+	require.Equal(t, convertToCanalTs(ddlEvent.CommitTs), msg.ExecutionTime)
 	require.True(t, msg.IsDDL)
-	require.Equal(t, "cdc", msg.Schema)
+	require.Equal(t, "test", msg.Schema)
 	require.Equal(t, "person", msg.Table)
-	require.Equal(t, testCaseDDL.Query, msg.Query)
+	require.Equal(t, ddlEvent.Query, msg.Query)
 	require.Equal(t, "CREATE", msg.EventType)
 
 	codecConfig.EnableTiDBExtension = true
@@ -394,19 +366,17 @@ func TestNewCanalJSONMessageFromDDL(t *testing.T) {
 	require.NoError(t, err)
 
 	encoder = builder.Build().(*JSONRowEventEncoder)
-	message = encoder.newJSONMessageForDDL(testCaseDDL)
+	message = encoder.newJSONMessageForDDL(ddlEvent)
 	require.NotNil(t, message)
 
 	withExtension, ok := message.(*canalJSONMessageWithTiDBExtension)
 	require.True(t, ok)
 
 	require.NotNil(t, withExtension.Extensions)
-	require.Equal(t, testCaseDDL.CommitTs, withExtension.Extensions.CommitTs)
+	require.Equal(t, ddlEvent.CommitTs, withExtension.Extensions.CommitTs)
 }
 
 func TestBatching(t *testing.T) {
-	t.Parallel()
-
 	ctx := context.Background()
 	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
 	builder, err := NewJSONRowEventEncoderBuilder(ctx, codecConfig)
@@ -414,7 +384,8 @@ func TestBatching(t *testing.T) {
 	encoder := builder.Build()
 	require.NotNil(t, encoder)
 
-	updateCase := *testCaseUpdate
+	_, _, updateEvent, _ := utils.NewLargeEvent4Test(t, config.GetDefaultReplicaConfig())
+	updateCase := *updateEvent
 	for i := 1; i <= 1000; i++ {
 		ts := uint64(i)
 		updateCase.CommitTs = ts
@@ -516,77 +487,65 @@ func TestCheckpointEventValueMarshal(t *testing.T) {
 	err = json.Unmarshal(msg.Value, &jsonMsg)
 	require.NoError(t, err)
 	require.Equal(t, watermark, jsonMsg.Extensions.WatermarkTs)
-	// Hack the build time.
-	// Otherwise, the timing will be inconsistent.
-	jsonMsg.BuildTime = 1469579899
-	rawBytes, err := json.MarshalIndent(jsonMsg, "", "  ")
-	require.NoError(t, err)
-
-	// No commit ts will be output.
-	expectedJSON := `{
-  "id": 0,
-  "database": "",
-  "table": "",
-  "pkNames": null,
-  "isDdl": false,
-  "type": "TIDB_WATERMARK",
-  "es": 0,
-  "ts": 1469579899,
-  "sql": "",
-  "sqlType": null,
-  "mysqlType": null,
-  "data": null,
-  "old": null,
-  "_tidb": {
-    "watermarkTs": 1024
-  }
-}`
-	require.Equal(t, expectedJSON, string(rawBytes))
+	require.Equal(t, tidbWaterMarkType, jsonMsg.EventType)
+	require.Equal(t, "", jsonMsg.Schema)
+	require.Equal(t, "", jsonMsg.Table)
+	require.Equal(t, "", jsonMsg.Query)
+	require.False(t, jsonMsg.IsDDL)
+	require.EqualValues(t, 0, jsonMsg.ExecutionTime)
+	require.Nil(t, jsonMsg.Data)
+	require.Nil(t, jsonMsg.Old)
+	require.Nil(t, jsonMsg.SQLType)
+	require.Nil(t, jsonMsg.MySQLType)
 }
 
-func TestDDLEventWithExtensionValueMarshal(t *testing.T) {
-	t.Parallel()
+func TestDDLEventWithExtension(t *testing.T) {
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	ctx := context.Background()
 	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
-	encoder := &JSONRowEventEncoder{
-		builder: newCanalEntryBuilder(codecConfig),
-		config:  &common.Config{EnableTiDBExtension: true},
-	}
+	codecConfig.EnableTiDBExtension = true
+	builder, err := NewJSONRowEventEncoderBuilder(ctx, codecConfig)
+	require.NoError(t, err)
+	encoder := builder.Build()
 	require.NotNil(t, encoder)
 
-	message := encoder.newJSONMessageForDDL(testCaseDDL)
-	require.NotNil(t, message)
+	sql := `create table test.person(id int, name varchar(32), tiny tinyint unsigned, comment text, primary key(id))`
+	ddlEvent := helper.DDL2Event(sql)
 
-	msg, ok := message.(*canalJSONMessageWithTiDBExtension)
-	require.True(t, ok)
-	// Hack the build time.
-	// Otherwise, the timing will be inconsistent.
-	msg.BuildTime = 1469579899
-	rawBytes, err := json.MarshalIndent(msg, "", "  ")
+	message, err := encoder.EncodeDDLEvent(ddlEvent)
 	require.NoError(t, err)
 
-	// No watermark ts will be output.
-	expectedJSON := `{
-  "id": 0,
-  "database": "cdc",
-  "table": "person",
-  "pkNames": null,
-  "isDdl": true,
-  "type": "CREATE",
-  "es": 1591943372224,
-  "ts": 1469579899,
-  "sql": "create table person(id int, name varchar(32), tiny tinyint unsigned, comment text, primary key(id))",
-  "sqlType": null,
-  "mysqlType": null,
-  "data": null,
-  "old": null,
-  "_tidb": {
-    "commitTs": 417318403368288260
-  }
-}`
-	require.Equal(t, expectedJSON, string(rawBytes))
+	decoder, err := NewBatchDecoder(ctx, codecConfig, nil)
+	require.NoError(t, err)
+
+	err = decoder.AddKeyValue(message.Key, message.Value)
+	require.NoError(t, err)
+
+	messageType, hasNext, err := decoder.HasNext()
+	require.NoError(t, err)
+	require.True(t, hasNext)
+	require.Equal(t, messageType, model.MessageTypeDDL)
+
+	decodedDDL, err := decoder.NextDDLEvent()
+	require.NoError(t, err)
+	require.Equal(t, ddlEvent.Query, decodedDDL.Query)
+	require.Equal(t, ddlEvent.CommitTs, decodedDDL.CommitTs)
+	require.Equal(t, ddlEvent.TableInfo.TableName.Schema, decodedDDL.TableInfo.TableName.Schema)
+	require.Equal(t, ddlEvent.TableInfo.TableName.Table, decodedDDL.TableInfo.TableName.Table)
 }
 
 func TestCanalJSONAppendRowChangedEventWithCallback(t *testing.T) {
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	sql := `create table test.t(a varchar(255) primary key)`
+	_ = helper.DDL2Event(sql)
+
+	sql = `insert into test.t values ("aa")`
+	row := helper.DML2Event(sql, "test", "t")
+
 	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
 	codecConfig.EnableTiDBExtension = true
 	ctx := context.Background()
@@ -596,22 +555,6 @@ func TestCanalJSONAppendRowChangedEventWithCallback(t *testing.T) {
 	encoder := builder.Build()
 
 	count := 0
-	row := &model.RowChangedEvent{
-		CommitTs: 1,
-		Table:    &model.TableName{Schema: "a", Table: "b"},
-		Columns: []*model.Column{{
-			Name:  "col1",
-			Type:  mysql.TypeVarchar,
-			Value: []byte("aa"),
-		}},
-		ColInfos: []rowcodec.ColInfo{
-			{
-				ID: 0,
-				Ft: types.NewFieldType(mysql.TypeVarchar),
-			},
-		},
-	}
-
 	tests := []struct {
 		row      *model.RowChangedEvent
 		callback func()
@@ -674,22 +617,14 @@ func TestCanalJSONAppendRowChangedEventWithCallback(t *testing.T) {
 }
 
 func TestMaxMessageBytes(t *testing.T) {
-	// the size of `testEvent` after being encoded by canal-json is 200
-	testEvent := &model.RowChangedEvent{
-		CommitTs: 1,
-		Table:    &model.TableName{Schema: "a", Table: "b"},
-		Columns: []*model.Column{{
-			Name:  "col1",
-			Type:  mysql.TypeVarchar,
-			Value: []byte("aa"),
-		}},
-		ColInfos: []rowcodec.ColInfo{
-			{
-				ID: 0,
-				Ft: types.NewFieldType(mysql.TypeVarchar),
-			},
-		},
-	}
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	sql := `create table test.t(a varchar(255) primary key)`
+	_ = helper.DDL2Event(sql)
+
+	sql = `insert into test.t values ("aa")`
+	row := helper.DML2Event(sql, "test", "t")
 
 	ctx := context.Background()
 	topic := ""
@@ -702,7 +637,7 @@ func TestMaxMessageBytes(t *testing.T) {
 	require.NoError(t, err)
 	encoder := builder.Build()
 
-	err = encoder.AppendRowChangedEvent(ctx, topic, testEvent, nil)
+	err = encoder.AppendRowChangedEvent(ctx, topic, row, nil)
 	require.NoError(t, err)
 
 	// the test message length is larger than max-message-bytes
@@ -712,62 +647,155 @@ func TestMaxMessageBytes(t *testing.T) {
 	require.NoError(t, err)
 
 	encoder = builder.Build()
-	err = encoder.AppendRowChangedEvent(ctx, topic, testEvent, nil)
+	err = encoder.AppendRowChangedEvent(ctx, topic, row, nil)
 	require.Error(t, err, cerror.ErrMessageTooLarge)
 }
 
 func TestCanalJSONContentCompatibleE2E(t *testing.T) {
-	t.Parallel()
-
 	ctx := context.Background()
 	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
 	codecConfig.EnableTiDBExtension = true
 	codecConfig.ContentCompatible = true
+	codecConfig.OnlyOutputUpdatedColumns = true
 
 	builder, err := NewJSONRowEventEncoderBuilder(ctx, codecConfig)
 	require.NoError(t, err)
 
 	encoder := builder.Build()
 
-	err = encoder.AppendRowChangedEvent(ctx, "", testCaseInsert, func() {})
+	decoder, err := NewBatchDecoder(ctx, codecConfig, nil)
 	require.NoError(t, err)
 
-	message := encoder.Build()[0]
+	_, insertEvent, updateEvent, deleteEvent := utils.NewLargeEvent4Test(t, config.GetDefaultReplicaConfig())
+	events := []*model.RowChangedEvent{
+		insertEvent,
+		updateEvent,
+		deleteEvent,
+	}
+
+	for _, event := range events {
+		err = encoder.AppendRowChangedEvent(ctx, "", event, func() {})
+		require.NoError(t, err)
+
+		message := encoder.Build()[0]
+
+		err = decoder.AddKeyValue(message.Key, message.Value)
+		require.NoError(t, err)
+
+		messageType, hasNext, err := decoder.HasNext()
+		require.NoError(t, err)
+		require.True(t, hasNext)
+		require.Equal(t, messageType, model.MessageTypeRow)
+
+		decodedEvent, err := decoder.NextRowChangedEvent()
+		require.NoError(t, err)
+		require.Equal(t, decodedEvent.CommitTs, event.CommitTs)
+		require.Equal(t, decodedEvent.TableInfo.GetSchemaName(), event.TableInfo.GetSchemaName())
+		require.Equal(t, decodedEvent.TableInfo.GetTableName(), event.TableInfo.GetTableName())
+
+		obtainedColumns := make(map[string]*model.ColumnData, len(decodedEvent.Columns))
+		for _, column := range decodedEvent.Columns {
+			colName := decodedEvent.TableInfo.ForceGetColumnName(column.ColumnID)
+			obtainedColumns[colName] = column
+		}
+		for _, col := range event.Columns {
+			colName := event.TableInfo.ForceGetColumnName(col.ColumnID)
+			decoded, ok := obtainedColumns[colName]
+			require.True(t, ok)
+			switch v := col.Value.(type) {
+			case types.VectorFloat32:
+				require.EqualValues(t, v.String(), decoded.Value)
+			default:
+				require.EqualValues(t, v, decoded.Value)
+			}
+		}
+
+		obtainedPreColumns := make(map[string]*model.ColumnData, len(decodedEvent.PreColumns))
+		for _, column := range decodedEvent.PreColumns {
+			colName := decodedEvent.TableInfo.ForceGetColumnName(column.ColumnID)
+			obtainedPreColumns[colName] = column
+		}
+		for _, col := range event.PreColumns {
+			colName := event.TableInfo.ForceGetColumnName(col.ColumnID)
+			decoded, ok := obtainedPreColumns[colName]
+			require.True(t, ok)
+			switch v := col.Value.(type) {
+			case types.VectorFloat32:
+				require.EqualValues(t, v.String(), decoded.Value)
+			default:
+				require.EqualValues(t, v, decoded.Value)
+			}
+		}
+	}
+}
+
+func TestE2EPartitionTableByHash(t *testing.T) {
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	helper.Tk().MustExec("use test")
+
+	createTableDDLEvent := helper.DDL2Event(`CREATE TABLE t (a INT,PRIMARY KEY(a)) PARTITION BY HASH (a) PARTITIONS 5`)
+	require.NotNil(t, createTableDDLEvent)
+	insertEvent := helper.DML2Event(`insert into t values (5)`, "test", "t", "p0")
+	require.NotNil(t, insertEvent)
+
+	ctx := context.Background()
+	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
+
+	builder, err := NewJSONRowEventEncoderBuilder(ctx, codecConfig)
+	require.NoError(t, err)
+	encoder := builder.Build()
 
 	decoder, err := NewBatchDecoder(ctx, codecConfig, nil)
+	require.NoError(t, err)
+
+	message, err := encoder.EncodeDDLEvent(createTableDDLEvent)
 	require.NoError(t, err)
 
 	err = decoder.AddKeyValue(message.Key, message.Value)
 	require.NoError(t, err)
 
-	messageType, hasNext, err := decoder.HasNext()
+	tp, hasNext, err := decoder.HasNext()
 	require.NoError(t, err)
 	require.True(t, hasNext)
-	require.Equal(t, messageType, model.MessageTypeRow)
+	require.Equal(t, model.MessageTypeDDL, tp)
+
+	decodedDDL, err := decoder.NextDDLEvent()
+	require.NoError(t, err)
+	require.NotNil(t, decodedDDL)
+
+	err = encoder.AppendRowChangedEvent(ctx, "", insertEvent, nil)
+	require.NoError(t, err)
+	message = encoder.Build()[0]
+
+	err = decoder.AddKeyValue(message.Key, message.Value)
+	require.NoError(t, err)
+	tp, hasNext, err = decoder.HasNext()
+	require.NoError(t, err)
+	require.True(t, hasNext)
+	require.Equal(t, model.MessageTypeRow, tp)
 
 	decodedEvent, err := decoder.NextRowChangedEvent()
 	require.NoError(t, err)
-	require.Equal(t, decodedEvent.CommitTs, testCaseInsert.CommitTs)
-	require.Equal(t, decodedEvent.Table.Schema, testCaseInsert.Table.Schema)
-	require.Equal(t, decodedEvent.Table.Table, testCaseInsert.Table.Table)
-
-	obtainedColumns := make(map[string]*model.Column, len(decodedEvent.Columns))
-	for _, column := range decodedEvent.Columns {
-		obtainedColumns[column.Name] = column
-	}
-
-	expectedValue := collectExpectedDecodedValue(testColumnsTable)
-	for _, actual := range testCaseInsert.Columns {
-		obtained, ok := obtainedColumns[actual.Name]
-		require.True(t, ok)
-		require.Equal(t, actual.Type, obtained.Type)
-		require.Equal(t, expectedValue[actual.Name], obtained.Value)
-	}
+	require.NotZero(t, decodedEvent.GetTableID())
+	require.Equal(t, decodedEvent.GetTableID(), decodedEvent.TableInfo.GetPartitionInfo().Definitions[0].ID)
 }
 
-func TestE2EPartitionTable(t *testing.T) {
+func TestE2EPartitionTableByRange(t *testing.T) {
 	helper := entry.NewSchemaTestHelper(t)
 	defer helper.Close()
+
+	helper.Tk().MustExec("use test")
+
+	createTableDDLEvent := helper.DDL2Event(`create table t (id int primary key, a int) PARTITION BY RANGE ( id ) (
+		PARTITION p0 VALUES LESS THAN (6),
+		PARTITION p1 VALUES LESS THAN (11),
+		PARTITION p2 VALUES LESS THAN (21))`)
+	require.NotNil(t, createTableDDLEvent)
+
+	insertEvent := helper.DML2Event(`insert into t (id) values (6)`, "test", "t", "p1")
+	require.NotNil(t, insertEvent)
 
 	ctx := context.Background()
 	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
@@ -778,6 +806,42 @@ func TestE2EPartitionTable(t *testing.T) {
 
 	decoder, err := NewBatchDecoder(ctx, codecConfig, nil)
 	require.NoError(t, err)
+
+	message, err := encoder.EncodeDDLEvent(createTableDDLEvent)
+	require.NoError(t, err)
+
+	err = decoder.AddKeyValue(message.Key, message.Value)
+	require.NoError(t, err)
+
+	tp, hasNext, err := decoder.HasNext()
+	require.NoError(t, err)
+	require.True(t, hasNext)
+	require.Equal(t, model.MessageTypeDDL, tp)
+
+	decodedDDL, err := decoder.NextDDLEvent()
+	require.NoError(t, err)
+	require.NotNil(t, decodedDDL)
+
+	err = encoder.AppendRowChangedEvent(ctx, "", insertEvent, nil)
+	require.NoError(t, err)
+	message = encoder.Build()[0]
+
+	err = decoder.AddKeyValue(message.Key, message.Value)
+	require.NoError(t, err)
+	tp, hasNext, err = decoder.HasNext()
+	require.NoError(t, err)
+	require.True(t, hasNext)
+	require.Equal(t, model.MessageTypeRow, tp)
+
+	decodedEvent, err := decoder.NextRowChangedEvent()
+	require.NoError(t, err)
+	require.NotZero(t, decodedEvent.GetTableID())
+	require.Equal(t, decodedEvent.GetTableID(), decodedEvent.TableInfo.GetPartitionInfo().Definitions[1].ID)
+}
+
+func TestE2EPartitionTable(t *testing.T) {
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
 
 	helper.Tk().MustExec("use test")
 
@@ -796,23 +860,81 @@ func TestE2EPartitionTable(t *testing.T) {
 	insertEvent2 := helper.DML2Event(`insert into test.t values (21, 21)`, "test", "t", "p2")
 	require.NotNil(t, insertEvent2)
 
-	events := []*model.RowChangedEvent{insertEvent, insertEvent1, insertEvent2}
+	ctx := context.Background()
+	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
+	for _, enableTiDBExtension := range []bool{false, true} {
+		codecConfig.EnableTiDBExtension = enableTiDBExtension
 
-	for _, event := range events {
-		err = encoder.AppendRowChangedEvent(ctx, "", event, nil)
+		builder, err := NewJSONRowEventEncoderBuilder(ctx, codecConfig)
 		require.NoError(t, err)
-		message := encoder.Build()[0]
+		encoder := builder.Build()
+
+		decoder, err := NewBatchDecoder(ctx, codecConfig, nil)
+		require.NoError(t, err)
+
+		message, err := encoder.EncodeDDLEvent(createPartitionTableDDL)
+		require.NoError(t, err)
 
 		err = decoder.AddKeyValue(message.Key, message.Value)
 		require.NoError(t, err)
+
 		tp, hasNext, err := decoder.HasNext()
+		require.NoError(t, err)
+		require.True(t, hasNext)
+		require.Equal(t, model.MessageTypeDDL, tp)
+
+		decodedDDL, err := decoder.NextDDLEvent()
+		require.NoError(t, err)
+		require.NotNil(t, decodedDDL)
+
+		err = encoder.AppendRowChangedEvent(ctx, "", insertEvent, nil)
+		require.NoError(t, err)
+		message = encoder.Build()[0]
+
+		err = decoder.AddKeyValue(message.Key, message.Value)
+		require.NoError(t, err)
+		tp, hasNext, err = decoder.HasNext()
 		require.NoError(t, err)
 		require.True(t, hasNext)
 		require.Equal(t, model.MessageTypeRow, tp)
 
 		decodedEvent, err := decoder.NextRowChangedEvent()
 		require.NoError(t, err)
-		// canal-json does not support encode the table id, so it's 0
-		require.Equal(t, decodedEvent.GetTableID(), int64(0))
+		require.NotZero(t, decodedEvent.GetTableID())
+		require.Equal(t, decodedEvent.GetTableID(), decodedEvent.TableInfo.GetPartitionInfo().Definitions[0].ID)
+
+		err = encoder.AppendRowChangedEvent(ctx, "", insertEvent1, nil)
+		require.NoError(t, err)
+		message = encoder.Build()[0]
+
+		err = decoder.AddKeyValue(message.Key, message.Value)
+		require.NoError(t, err)
+		tp, hasNext, err = decoder.HasNext()
+		require.NoError(t, err)
+		require.True(t, hasNext)
+		require.Equal(t, model.MessageTypeRow, tp)
+
+		decodedEvent, err = decoder.NextRowChangedEvent()
+		require.NoError(t, err)
+
+		require.NotZero(t, decodedEvent.GetTableID())
+		require.Equal(t, decodedEvent.GetTableID(), decodedEvent.TableInfo.GetPartitionInfo().Definitions[1].ID)
+
+		err = encoder.AppendRowChangedEvent(ctx, "", insertEvent2, nil)
+		require.NoError(t, err)
+		message = encoder.Build()[0]
+
+		err = decoder.AddKeyValue(message.Key, message.Value)
+		require.NoError(t, err)
+		tp, hasNext, err = decoder.HasNext()
+		require.NoError(t, err)
+		require.True(t, hasNext)
+		require.Equal(t, model.MessageTypeRow, tp)
+
+		decodedEvent, err = decoder.NextRowChangedEvent()
+		require.NoError(t, err)
+
+		require.NotZero(t, decodedEvent.GetTableID())
+		require.Equal(t, decodedEvent.GetTableID(), decodedEvent.TableInfo.GetPartitionInfo().Definitions[2].ID)
 	}
 }

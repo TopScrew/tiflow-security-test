@@ -145,7 +145,7 @@ mysql-instances:
 	// test after to string, taskStr can be `Decode` normally
 	taskStr := task1.String()
 	task2 := NewTaskConfig()
-	err = task2.Decode(taskStr)
+	err = task2.FromYaml(taskStr)
 	c.Require().NoError(err)
 	c.Require().True(bytes.Contains(task2.TargetDB.Security.SSLCABytes, c.noContent))
 	c.Require().True(bytes.Contains(task2.TargetDB.Security.SSLCertBytes, c.noContent))
@@ -170,4 +170,22 @@ func (c *testTLSConfig) TestClone() {
 	c.Require().Equal(s, clone)
 	clone.CertAllowedCN[0] = "g"
 	c.Require().NotEqual(s, clone)
+}
+
+func TestWriteTLSContentToFiles(t *testing.T) {
+	taskName := "TestWriteTLSContentToFiles"
+	s := &security.Security{
+		SSLCA:         "a",
+		SSLCert:       "b",
+		SSLKey:        "c",
+		CertAllowedCN: []string{"d"},
+		SSLCABytes:    []byte("e"),
+		SSLKeyBytes:   []byte("f"),
+		SSLCertBytes:  []byte("g"),
+	}
+	err := s.WriteTLSContentToFiles(taskName)
+	require.NoError(t, err)
+	require.Contains(t, s.SSLCA, taskName)
+	require.Contains(t, s.SSLCert, taskName)
+	require.Contains(t, s.SSLKey, taskName)
 }

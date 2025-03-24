@@ -26,7 +26,7 @@ import (
 	"github.com/docker/go-units"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/meta/model"
 	tidbmysql "github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/util/dbutil"
 	"github.com/pingcap/tidb/pkg/util/filter"
@@ -476,7 +476,7 @@ type validateCompareContext struct {
 	columns     []*model.ColumnInfo
 }
 
-// a simplified version of https://github.com/pingcap/tidb-tools/blob/d9fdfa2f9040aab3fab7cd11774a82226f467fe7/sync_diff_inspector/utils/utils.go#L487-L606
+// a simplified version of CompareData in https://github.com/pingcap/tiflow/blob/4c38b919659e8506c220d1be9b0fdd7baf609e33/sync_diff_inspector/utils/utils.go#L538
 func (c *validateCompareContext) compareData(key string, sourceData, targetData []*sql.NullString) (bool, error) {
 	for i, column := range c.columns {
 		data1, data2 := sourceData[i], targetData[i]
