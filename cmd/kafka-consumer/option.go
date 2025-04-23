@@ -170,7 +170,6 @@ func (o *option) Adjust(upstreamURI *url.URL, configFile string) error {
 		zap.String("groupID", o.groupID),
 		zap.Int("maxMessageBytes", o.maxMessageBytes),
 		zap.Int("maxBatchSize", o.maxBatchSize),
-		zap.String("upstreamURI", upstreamURI.String()),
-		zap.String("downstreamURI", o.downstreamURI))
+		zap.String("upstreamURI", upstreamURI.String()))
 	return nil
 }

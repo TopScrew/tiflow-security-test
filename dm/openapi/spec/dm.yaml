@@ -1412,37 +1412,6 @@ components:
         - "user"
         - "enable_gtid"
         - "enable"
-    TaskTableMigrateRuleSource:
-      description: source-related configuration
-      properties:
-        source_name:
-          type: string
-          description: source name
-          example: "source-name"
-        schema:
-          type: string
-          description: schema name, wildcard support
-          example: "db-*"
-        table:
-          type: string
-          description: table name, wildcard support
-          example: "tb-*"
-      required:
-        - "source_name"
-        - "schema"
-        - "table"
-    TaskTableMigrateRuleTarget:
-      type: object
-      description: downstream-related configuration
-      properties:
-        schema:
-          type: string
-          description: schema name, does not support wildcards
-          example: "db1"
-        table:
-          type: string
-          description: table name, does not support wildcards
-          example: "tb1"        
     ShardingGroup:
       type: object
       properties:
@@ -1487,16 +1456,12 @@ components:
           type: string
         meta_binlog_gtid:
           type: string
-        bps:
-          type: integer
-          format: int64
       required:
         - "finished_bytes"
         - "total_bytes"
         - "progress"
         - "meta_binlog"
         - "meta_binlog_gtid"
-        - "bps"
     SyncStatus:
       type: object
       description: "status of sync unit"
@@ -1535,12 +1500,6 @@ components:
         seconds_behind_master:
           type: integer
           format: int64
-        io_total_bytes:
-          type: integer
-          format: uint64
-        dump_io_total_bytes:
-          type: integer
-          format: uint64
       required:
         - "total_events"
         - "total_tps"
@@ -1554,8 +1513,6 @@ components:
         - "synced"
         - "binlog_type"
         - "seconds_behind_master"
-        - "io_total_bytes"
-        - "dump_io_total_bytes"
     DumpStatus:
       type: object
       description: "status of dump unit"
@@ -1575,19 +1532,12 @@ components:
         estimate_total_rows:
           type: number
           format: double
-        bps:
-          type: integer
-          format: int64
-        progress:
-          type: string
       required:
         - "total_tables"
         - "completed_tables"
         - "finished_bytes"
         - "finished_rows"
         - "estimate_total_rows"
-        - "bps"
-        - "progress"
     SubTaskStatus:
       type: object
       properties:
@@ -1648,7 +1598,6 @@ components:
           description: "source password"
         security:
           $ref: "#/components/schemas/Security"
-          description: "downstram database ssl config"
       required:
         - "host"
         - "port"
@@ -1677,9 +1626,37 @@ components:
       description: "upstream table to downstream migrate rules"
       properties:
         source:
-          $ref: "#/components/schemas/TaskTableMigrateRuleSource"
+          type: object
+          description: source-related configuration
+          properties:
+            source_name:
+              type: string
+              description: source name
+              example: "source-name"
+            schema:
+              type: string
+              description: schema name, wildcard support
+              example: "db-*"
+            table:
+              type: string
+              description: table name, wildcard support
+              example: "tb-*"
+          required:
+            - "source_name"
+            - "schema"
+            - "table"
         target:
-          $ref: "#/components/schemas/TaskTableMigrateRuleTarget"
+          type: object
+          description: downstream-related configuration
+          properties:
+            schema:
+              type: string
+              description: schema name, does not support wildcards
+              example: "db1"
+            table:
+              type: string
+              description: table name, does not support wildcards
+              example: "tb1"
         binlog_filter_rule:
           type: array
           description: "filter rule name"
@@ -1748,10 +1725,7 @@ components:
           description: "to control compress kv pairs of physical import"
         pd_addr:
           type: string
-          description: "address of pd"          
-        security:
-          $ref: "#/components/schemas/Security"
-          description: "downstram tidb cluster ssl config"
+          description: "address of pd"
         on_duplicate_logical:
           type: string
           example: "replace"
@@ -1835,7 +1809,6 @@ components:
         - Stopped
         - Running
         - Finished
-        - Paused
     Task:
       description: "task"
       type: object
@@ -1852,8 +1825,6 @@ components:
             - "full"
             - "incremental"
             - "all"
-            - "dump"
-            - "load"
         shard_mode:
           type: string
           description: the way to coordinate DDL

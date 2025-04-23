@@ -19,7 +19,6 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/BurntSushi/toml"
 	"github.com/fatih/color"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
@@ -188,27 +187,12 @@ func (o *createChangefeedOptions) completeReplicaCfg() error {
 // validate checks that the provided attach options are specified.
 func (o *createChangefeedOptions) validate(cmd *cobra.Command) error {
 	if o.timezone != "SYSTEM" {
-		cmd.Println(color.HiYellowString("[WARN] --tz is deprecated in changefeed settings.\n"))
-	}
-
-	if len(o.commonChangefeedOptions.configFile) > 0 {
-		cfg := config.GetDefaultReplicaConfig()
-		metaData, err := toml.DecodeFile(o.commonChangefeedOptions.configFile, cfg)
-		if err != nil {
-			return errors.Trace(err)
-		}
-
-		if metaData.IsDefined("sink", "enable-partition-separator") {
-			cmd.Println(color.HiYellowString("sink.enable-partition-separator is deprecated and will be removed in future versions. " +
-				"The default value for sink.enable-partition-separator is `true`. " +
-				"Changing it to `false` may lead to data inconsistency issues. " +
-				"Please update your configuration as needed."))
-		}
+		cmd.Printf(color.HiYellowString("[WARN] --tz is deprecated in changefeed settings.\n"))
 	}
 
 	// user is not allowed to set sort-dir at changefeed level
 	if o.commonChangefeedOptions.sortDir != "" {
-		cmd.Println(color.HiYellowString("[WARN] --sort-dir is deprecated in changefeed settings. " +
+		cmd.Printf(color.HiYellowString("[WARN] --sort-dir is deprecated in changefeed settings. " +
 			"Please use `cdc server --data-dir` to start the cdc server if possible, sort-dir will be set automatically. " +
 			"The --sort-dir here will be no-op\n"))
 		return errors.New("creating changefeed with `--sort-dir`, it's invalid")

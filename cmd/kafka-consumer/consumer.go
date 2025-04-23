@@ -22,7 +22,6 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 func getPartitionNum(o *option) (int32, error) {
@@ -100,9 +99,6 @@ func newConsumer(ctx context.Context, o *option) *consumer {
 		_ = configMap.SetKey("ssl.key.location", o.key)
 		_ = configMap.SetKey("ssl.certificate.location", o.cert)
 	}
-	if level, err := zapcore.ParseLevel(o.logLevel); err == nil && level.String() == "debug" {
-		configMap.SetKey("debug", "all")
-	}
 	client, err := kafka.NewConsumer(configMap)
 	if err != nil {
 		log.Panic("create kafka consumer failed", zap.Error(err))
@@ -125,12 +121,6 @@ func (c *consumer) Consume(ctx context.Context) {
 		}
 	}()
 	for {
-		select {
-		case <-ctx.Done():
-			log.Info("consumer exist: context cancelled")
-			return
-		default:
-		}
 		msg, err := c.client.ReadMessage(-1)
 		if err != nil {
 			log.Error("read message failed, just continue to retry", zap.Error(err))
@@ -143,12 +133,10 @@ func (c *consumer) Consume(ctx context.Context) {
 
 		topicPartition, err := c.client.CommitMessage(msg)
 		if err != nil {
-			log.Error("commit message failed, just continue",
-				zap.String("topic", *msg.TopicPartition.Topic), zap.Int32("partition", msg.TopicPartition.Partition),
-				zap.Any("offset", msg.TopicPartition.Offset), zap.Error(err))
+			log.Error("commit message failed, just continue", zap.Error(err))
 			continue
 		}
-		log.Debug("commit message success",
+		log.Info("commit message success",
 			zap.String("topic", topicPartition[0].String()), zap.Int32("partition", topicPartition[0].Partition),
 			zap.Any("offset", topicPartition[0].Offset))
 	}

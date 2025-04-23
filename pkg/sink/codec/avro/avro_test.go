@@ -76,7 +76,7 @@ func TestDMLEventE2E(t *testing.T) {
 			decodedEvent, err := decoder.NextRowChangedEvent()
 			require.NoError(t, err)
 			require.NotNil(t, decodedEvent)
-			require.NotZero(t, decodedEvent.GetTableID())
+			require.Equal(t, decodedEvent.GetTableID(), int64(0))
 
 			TeardownEncoderAndSchemaRegistry4Testing()
 		}

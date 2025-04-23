@@ -37,8 +37,7 @@ type decoder struct {
 	config *common.Config
 	topic  string
 
-	upstreamTiDB     *sql.DB
-	tableIDAllocator *common.FakeTableIDAllocator
+	upstreamTiDB *sql.DB
 
 	schemaM SchemaManager
 
@@ -54,11 +53,10 @@ func NewDecoder(
 	db *sql.DB,
 ) codec.RowEventDecoder {
 	return &decoder{
-		config:           config,
-		topic:            topic,
-		schemaM:          schemaM,
-		upstreamTiDB:     db,
-		tableIDAllocator: common.NewFakeTableIDAllocator(),
+		config:       config,
+		topic:        topic,
+		schemaM:      schemaM,
+		upstreamTiDB: db,
 	}
 }
 
@@ -126,7 +124,6 @@ func (d *decoder) NextRowChangedEvent() (*model.RowChangedEvent, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	event.PhysicalTableID = d.tableIDAllocator.AllocateTableID(event.TableInfo.GetSchemaName(), event.TableInfo.GetTableName())
 
 	// Delete event only has Primary Key Columns, but the checksum is calculated based on the whole row columns,
 	// checksum verification cannot be done here, so skip it.

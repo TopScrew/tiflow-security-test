@@ -231,6 +231,9 @@ func (APIV2HelpersImpl) verifyCreateChangefeedConfig(
 		return nil, errors.Cause(err)
 	}
 	if !replicaCfg.ForceReplicate && !cfg.ReplicaConfig.IgnoreIneligibleTable {
+		if err != nil {
+			return nil, err
+		}
 		if len(ineligibleTables) != 0 {
 			return nil, cerror.ErrTableIneligible.GenWithStackByArgs(ineligibleTables)
 		}
@@ -318,7 +321,6 @@ func (APIV2HelpersImpl) verifyUpdateChangefeedConfig(
 		configUpdated = true
 		newInfo.Config = cfg.ReplicaConfig.ToInternalReplicaConfig()
 	}
-	// If the sinkURI is empty, we keep the old sinkURI.
 	if cfg.SinkURI != "" {
 		sinkURIUpdated = true
 		newInfo.SinkURI = cfg.SinkURI

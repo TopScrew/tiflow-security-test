@@ -28,13 +28,9 @@ const (
 const (
 	TaskTaskModeAll TaskTaskMode = "all"
 
-	TaskTaskModeDump TaskTaskMode = "dump"
-
 	TaskTaskModeFull TaskTaskMode = "full"
 
 	TaskTaskModeIncremental TaskTaskMode = "incremental"
-
-	TaskTaskModeLoad TaskTaskMode = "load"
 )
 
 // Defines values for TaskFullMigrateConfAnalyze.
@@ -81,8 +77,6 @@ const (
 // Defines values for TaskStage.
 const (
 	TaskStageFinished TaskStage = "Finished"
-
-	TaskStagePaused TaskStage = "Paused"
 
 	TaskStageRunning TaskStage = "Running"
 
@@ -169,12 +163,10 @@ type DisableRelayRequest struct {
 
 // status of dump unit
 type DumpStatus struct {
-	Bps               int64   `json:"bps"`
 	CompletedTables   float64 `json:"completed_tables"`
 	EstimateTotalRows float64 `json:"estimate_total_rows"`
 	FinishedBytes     float64 `json:"finished_bytes"`
 	FinishedRows      float64 `json:"finished_rows"`
-	Progress          string  `json:"progress"`
 	TotalTables       int64   `json:"total_tables"`
 }
 
@@ -266,7 +258,6 @@ type GrafanaTopology struct {
 
 // status of load unit
 type LoadStatus struct {
-	Bps            int64  `json:"bps"`
 	FinishedBytes  int64  `json:"finished_bytes"`
 	MetaBinlog     string `json:"meta_binlog"`
 	MetaBinlogGtid string `json:"meta_binlog_gtid"`
@@ -508,8 +499,6 @@ type SyncStatus struct {
 
 	// sharding DDL which current is blocking
 	BlockingDdls        []string `json:"blocking_ddls"`
-	DumpIoTotalBytes    uint64   `json:"dump_io_total_bytes"`
-	IoTotalBytes        uint64   `json:"io_total_bytes"`
 	MasterBinlog        string   `json:"master_binlog"`
 	MasterBinlogGtid    string   `json:"master_binlog_gtid"`
 	RecentTps           int64    `json:"recent_tps"`
@@ -630,9 +619,6 @@ type TaskFullMigrateConf struct {
 	// to control range concurrency of physical import
 	RangeConcurrency *int `json:"range_concurrency,omitempty"`
 
-	// data source ssl configuration, the field will be hidden when getting the data source configuration from the interface
-	Security *Security `json:"security"`
-
 	// sorting dir name for physical import
 	SortingDir *string `json:"sorting_dir,omitempty"`
 }
@@ -703,31 +689,25 @@ type TaskTableMigrateRule struct {
 	BinlogFilterRule *[]string `json:"binlog_filter_rule,omitempty"`
 
 	// source-related configuration
-	Source TaskTableMigrateRuleSource `json:"source"`
+	Source struct {
+		// schema name, wildcard support
+		Schema string `json:"schema"`
+
+		// source name
+		SourceName string `json:"source_name"`
+
+		// table name, wildcard support
+		Table string `json:"table"`
+	} `json:"source"`
 
 	// downstream-related configuration
-	Target *TaskTableMigrateRuleTarget `json:"target,omitempty"`
-}
+	Target *struct {
+		// schema name, does not support wildcards
+		Schema *string `json:"schema,omitempty"`
 
-// source-related configuration
-type TaskTableMigrateRuleSource struct {
-	// schema name, wildcard support
-	Schema string `json:"schema"`
-
-	// source name
-	SourceName string `json:"source_name"`
-
-	// table name, wildcard support
-	Table string `json:"table"`
-}
-
-// downstream-related configuration
-type TaskTableMigrateRuleTarget struct {
-	// schema name, does not support wildcards
-	Schema *string `json:"schema,omitempty"`
-
-	// table name, does not support wildcards
-	Table *string `json:"table,omitempty"`
+		// table name, does not support wildcards
+		Table *string `json:"table,omitempty"`
+	} `json:"target,omitempty"`
 }
 
 // downstream database configuration

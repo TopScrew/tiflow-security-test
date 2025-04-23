@@ -74,7 +74,7 @@ type Config struct {
 	OutputOldValue       bool
 	OutputHandleKey      bool
 
-	// for open protocol, and canal-json
+	// for open protocol
 	OnlyOutputUpdatedColumns bool
 	// Whether old value should be excluded in the output.
 	OpenOutputOldValue bool
@@ -339,9 +339,9 @@ func (c *Config) WithChangefeedID(id model.ChangeFeedID) *Config {
 // Validate the Config
 func (c *Config) Validate() error {
 	if c.EnableTiDBExtension &&
-		!(c.Protocol == config.ProtocolCanalJSON || c.Protocol == config.ProtocolAvro || c.Protocol == config.ProtocolDebezium) {
+		!(c.Protocol == config.ProtocolCanalJSON || c.Protocol == config.ProtocolAvro) {
 		log.Warn("ignore invalid config, enable-tidb-extension"+
-			"only supports canal-json/avro/debezium protocol",
+			"only supports canal-json/avro protocol",
 			zap.Bool("enableTidbExtension", c.EnableTiDBExtension),
 			zap.String("protocol", c.Protocol.String()))
 	}

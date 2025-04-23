@@ -290,5 +290,4 @@ func TestGetDLLDispatchRuleByProtocol(t *testing.T) {
 	require.Equal(t, PartitionAll, getDDLDispatchRule(config.ProtocolMaxwell))
 	require.Equal(t, PartitionAll, getDDLDispatchRule(config.ProtocolCraft))
 	require.Equal(t, PartitionAll, getDDLDispatchRule(config.ProtocolSimple))
-	require.Equal(t, PartitionAll, getDDLDispatchRule(config.ProtocolDebezium))
 }

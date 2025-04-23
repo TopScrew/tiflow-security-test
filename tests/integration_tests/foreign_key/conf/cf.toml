@@ -1,2 +1,0 @@
-[filter]
-rules = ['*.*', '!foreign_key.t12']

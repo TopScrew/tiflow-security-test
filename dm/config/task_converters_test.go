@@ -16,11 +16,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/google/uuid"
 	"github.com/pingcap/check"
 	"github.com/pingcap/tidb/pkg/util/filter"
 	"github.com/pingcap/tiflow/dm/config/dbconfig"
-	"github.com/pingcap/tiflow/dm/config/security"
 	"github.com/pingcap/tiflow/dm/openapi"
 	"github.com/pingcap/tiflow/dm/openapi/fixtures"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
@@ -66,12 +64,6 @@ func testNoShardTaskToSubTaskConfigs(c *check.C) {
 		Port:     task.TargetConfig.Port,
 		User:     task.TargetConfig.User,
 		Password: task.TargetConfig.Password,
-		Security: &security.Security{
-			SSLCABytes:    []byte(task.TargetConfig.Security.SslCaContent),
-			SSLCertBytes:  []byte(task.TargetConfig.Security.SslCertContent),
-			SSLKeyBytes:   []byte(task.TargetConfig.Security.SslKeyContent),
-			CertAllowedCN: *task.TargetConfig.Security.CertAllowedCn,
-		},
 	}
 	// change meta
 	newMeta := "new_dm_meta"
@@ -125,20 +117,6 @@ func testNoShardTaskToSubTaskConfigs(c *check.C) {
 	c.Assert(subTaskConfig.BAList, check.DeepEquals, bAListFromOpenAPITask)
 	// check ignore check items
 	c.Assert(subTaskConfig.IgnoreCheckingItems, check.IsNil)
-	// check io total bytes counter and uuid
-	c.Assert(subTaskConfig.IOTotalBytes, check.NotNil)
-	c.Assert(subTaskConfig.DumpIOTotalBytes, check.NotNil)
-	c.Assert(subTaskConfig.IOTotalBytes.Load(), check.Equals, uint64(0))
-	c.Assert(subTaskConfig.DumpIOTotalBytes.Load(), check.Equals, uint64(0))
-	c.Assert(subTaskConfig.UUID, check.HasLen, len(uuid.NewString()))
-	c.Assert(subTaskConfig.DumpUUID, check.HasLen, len(uuid.NewString()))
-	// check security items
-	c.Assert(string(subTaskConfig.To.Security.SSLCABytes), check.Equals, task.TargetConfig.Security.SslCaContent)
-	c.Assert(string(subTaskConfig.To.Security.SSLCertBytes), check.Equals, task.TargetConfig.Security.SslCertContent)
-	c.Assert(string(subTaskConfig.To.Security.SSLKeyBytes), check.Equals, task.TargetConfig.Security.SslKeyContent)
-	c.Assert(string(subTaskConfig.LoaderConfig.Security.SSLCABytes), check.Equals, task.SourceConfig.FullMigrateConf.Security.SslCaContent)
-	c.Assert(string(subTaskConfig.LoaderConfig.Security.SSLCertBytes), check.Equals, task.SourceConfig.FullMigrateConf.Security.SslCertContent)
-	c.Assert(string(subTaskConfig.LoaderConfig.Security.SSLKeyBytes), check.Equals, task.SourceConfig.FullMigrateConf.Security.SslKeyContent)
 }
 
 func testShardAndFilterTaskToSubTaskConfigs(c *check.C) {
@@ -298,12 +276,6 @@ func testNoShardSubTaskConfigsToOpenAPITask(c *check.C) {
 		Port:     task.TargetConfig.Port,
 		User:     task.TargetConfig.User,
 		Password: task.TargetConfig.Password,
-		Security: &security.Security{
-			SSLCABytes:    []byte(task.TargetConfig.Security.SslCaContent),
-			SSLCertBytes:  []byte(task.TargetConfig.Security.SslCertContent),
-			SSLKeyBytes:   []byte(task.TargetConfig.Security.SslKeyContent),
-			CertAllowedCN: *task.TargetConfig.Security.CertAllowedCn,
-		},
 	}
 	subTaskConfigList, err := OpenAPITaskToSubTaskConfigs(&task, toDBCfg, sourceCfgMap)
 	c.Assert(err, check.IsNil)
@@ -390,12 +362,6 @@ func TestConvertWithIgnoreCheckItems(t *testing.T) {
 		Port:     task.TargetConfig.Port,
 		User:     task.TargetConfig.User,
 		Password: task.TargetConfig.Password,
-		Security: &security.Security{
-			SSLCABytes:    []byte(task.TargetConfig.Security.SslCaContent),
-			SSLCertBytes:  []byte(task.TargetConfig.Security.SslCertContent),
-			SSLKeyBytes:   []byte(task.TargetConfig.Security.SslKeyContent),
-			CertAllowedCN: *task.TargetConfig.Security.CertAllowedCn,
-		},
 	}
 	subTaskConfigList, err := OpenAPITaskToSubTaskConfigs(&task, toDBCfg, sourceCfgMap)
 	require.NoError(t, err)
@@ -459,11 +425,18 @@ func TestConvertBetweenOpenAPITaskAndTaskConfig(t *testing.T) {
 		sourceSchema := task.TableMigrateRule[0].Source.Schema
 		targetSchema := *task.TableMigrateRule[0].Target.Schema
 		// only route schema
-		task.TableMigrateRule[0].Source = openapi.TaskTableMigrateRuleSource{
+		task.TableMigrateRule[0].Source = struct {
+			Schema     string `json:"schema"`
+			SourceName string `json:"source_name"`
+			Table      string `json:"table"`
+		}{
 			SourceName: source1Name,
 			Schema:     sourceSchema,
 		}
-		task.TableMigrateRule[0].Target = &openapi.TaskTableMigrateRuleTarget{
+		task.TableMigrateRule[0].Target = &struct {
+			Schema *string `json:"schema,omitempty"`
+			Table  *string `json:"table,omitempty"`
+		}{
 			Schema: &targetSchema,
 		}
 		taskCfg, err = OpenAPITaskToTaskConfig(&task, sourceCfgMap)
@@ -497,24 +470,38 @@ func TestConvertBetweenOpenAPITaskAndTaskConfig(t *testing.T) {
 		// only route table will meet error
 		sourceTable := "tb"
 		targetTable := "tb1"
-		task.TableMigrateRule[0].Source = openapi.TaskTableMigrateRuleSource{
+		task.TableMigrateRule[0].Source = struct {
+			Schema     string `json:"schema"`
+			SourceName string `json:"source_name"`
+			Table      string `json:"table"`
+		}{
 			SourceName: source1Name,
 			Schema:     sourceSchema,
 			Table:      sourceTable,
 		}
-		task.TableMigrateRule[0].Target = &openapi.TaskTableMigrateRuleTarget{
+		task.TableMigrateRule[0].Target = &struct {
+			Schema *string `json:"schema,omitempty"`
+			Table  *string `json:"table,omitempty"`
+		}{
 			Table: &targetTable,
 		}
 		_, err = OpenAPITaskToTaskConfig(&task, sourceCfgMap)
 		require.True(t, terror.ErrConfigGenTableRouter.Equal(err))
 
 		// route both
-		task.TableMigrateRule[0].Source = openapi.TaskTableMigrateRuleSource{
+		task.TableMigrateRule[0].Source = struct {
+			Schema     string `json:"schema"`
+			SourceName string `json:"source_name"`
+			Table      string `json:"table"`
+		}{
 			SourceName: source1Name,
 			Schema:     sourceSchema,
 			Table:      sourceTable,
 		}
-		task.TableMigrateRule[0].Target = &openapi.TaskTableMigrateRuleTarget{
+		task.TableMigrateRule[0].Target = &struct {
+			Schema *string `json:"schema,omitempty"`
+			Table  *string `json:"table,omitempty"`
+		}{
 			Schema: &targetSchema,
 			Table:  &targetTable,
 		}
@@ -557,7 +544,11 @@ func TestConvertBetweenOpenAPITaskAndTaskConfig(t *testing.T) {
 		require.EqualValues(t, taskAfterConvert, &task)
 
 		// no route and sync one schema
-		task.TableMigrateRule[0].Source = openapi.TaskTableMigrateRuleSource{
+		task.TableMigrateRule[0].Source = struct {
+			Schema     string `json:"schema"`
+			SourceName string `json:"source_name"`
+			Table      string `json:"table"`
+		}{
 			SourceName: source1Name,
 			Schema:     sourceSchema,
 			Table:      "",

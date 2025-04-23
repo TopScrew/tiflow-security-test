@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/google/uuid"
 	extstorage "github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/pkg/util/dbutil"
 	"github.com/pingcap/tidb/pkg/util/filter"
@@ -53,7 +52,6 @@ const (
 	ModeFull      = "full"
 	ModeIncrement = "incremental"
 	ModeDump      = "dump"
-	ModeLoad      = "load"
 	ModeLoadSync  = "load&sync"
 
 	DefaultShadowTableRules = "^_(.+)_(?:new|gho)$"
@@ -180,19 +178,17 @@ type SubTaskConfig struct {
 	ExtStorage      extstorage.ExternalStorage `toml:"-" json:"-"`
 	MetricsFactory  promutil.Factory           `toml:"-" json:"-"`
 	FrameworkLogger *zap.Logger                `toml:"-" json:"-"`
-	// members below are injected by dataflow engine
-	// UUID should be unique in one go runtime.
+	// members below are injected by dataflow engine, UUID should be unique in
+	// one go runtime.
 	// IOTotalBytes is used build TCPConnWithIOCounter and UUID is used to as a
 	// key to let MySQL driver to find the right TCPConnWithIOCounter.
-	// It will meter TCP io usage to downstream of the subtask
-	UUID         string         `toml:"uuid" json:"-"`
-	IOTotalBytes *atomic.Uint64 `toml:"io-total-bytes" json:"io-total-bytes"`
+	UUID         string         `toml:"-" json:"-"`
+	IOTotalBytes *atomic.Uint64 `toml:"-" json:"-"`
 
-	// DumpUUID as same as UUID
-	// DumpIOTotalBytes meter TCP io usage from upstream of the subtask, other same as IOTotalBytes
+	// meter network usage from upstream
 	// e.g., pulling binlog
-	DumpUUID         string         `toml:"dump-uuid" json:"-"`
-	DumpIOTotalBytes *atomic.Uint64 `toml:"dump-io-total-bytes" json:"dump-io-total-bytes"`
+	DumpUUID         string         `toml:"-" json:"-"`
+	DumpIOTotalBytes *atomic.Uint64 `toml:"-" json:"-"`
 }
 
 // SampleSubtaskConfig is the content of subtask.toml in current folder.
@@ -216,14 +212,6 @@ func (c *SubTaskConfig) SetFlagSet(flagSet *flag.FlagSet) {
 	c.flagSet = flagSet
 }
 
-// InitIOCounters init io counter and uuid for syncer.
-func (c *SubTaskConfig) InitIOCounters() {
-	c.IOTotalBytes = atomic.NewUint64(0)
-	c.DumpIOTotalBytes = atomic.NewUint64(0)
-	c.UUID = uuid.NewString()
-	c.DumpUUID = uuid.NewString()
-}
-
 // String returns the config's json string.
 func (c *SubTaskConfig) String() string {
 	cfg, err := json.Marshal(c)
@@ -234,10 +222,6 @@ func (c *SubTaskConfig) String() string {
 }
 
 // Toml returns TOML format representation of config.
-// Note: The atomic.Uint64 fields (IOTotalBytes and DumpIOTotalBytes) are not
-// encoded in the TOML output because they do not implement the necessary
-// marshaling interfaces. As a result, these fields will not be included in
-// the TOML representation.
 func (c *SubTaskConfig) Toml() (string, error) {
 	var b bytes.Buffer
 	enc := toml.NewEncoder(&b)
@@ -258,9 +242,6 @@ func (c *SubTaskConfig) DecodeFile(fpath string, verifyDecryptPassword bool) err
 }
 
 // Decode loads config from file data.
-// Note: The atomic.Uint64 fields (IOTotalBytes and DumpIOTotalBytes) will not
-// be populated from the TOML data since they cannot be decoded by toml.Decode().
-// As a result, these fields will remain uninitialized (zero value) after decoding.
 func (c *SubTaskConfig) Decode(data string, verifyDecryptPassword bool) error {
 	if _, err := toml.Decode(data, c); err != nil {
 		return terror.ErrConfigTomlTransform.Delegate(err, "decode subtask config from data")
@@ -348,9 +329,8 @@ func (c *SubTaskConfig) Adjust(verifyDecryptPassword bool) error {
 		c.MetaSchema = defaultMetaSchema
 	}
 
-	// adjust dir. Do not do this for both load and load&sync mode, as they are standalone
-	// mode and should take LoaderConfig.Dir as is
-	if HasLoad(c.Mode) && c.Mode != ModeLoadSync && c.Mode != ModeLoad {
+	// adjust dir, no need to do for load&sync mode because it needs its own s3 repository
+	if HasLoad(c.Mode) && c.Mode != ModeLoadSync {
 		// check
 		isS3 := storage.IsS3Path(c.LoaderConfig.Dir)
 		if isS3 && c.ImportMode == LoadModeLoader {
@@ -515,12 +495,6 @@ func (c *SubTaskConfig) Clone() (*SubTaskConfig, error) {
 	if err != nil {
 		return nil, terror.ErrConfigTomlTransform.Delegate(err, "decode subtask config from data")
 	}
-	// Manually copy atomic values for atomic.Uint64 doesn't implement TOML marshaling interfaces
-	if c.IOTotalBytes != nil {
-		clone.IOTotalBytes = atomic.NewUint64(c.IOTotalBytes.Load())
-	}
-	if c.DumpIOTotalBytes != nil {
-		clone.DumpIOTotalBytes = atomic.NewUint64(c.DumpIOTotalBytes.Load())
-	}
+
 	return clone, nil
 }

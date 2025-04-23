@@ -314,8 +314,11 @@ func (c *consumer) emitDMLEvents(
 		// Always enable tidb extension for canal-json protocol
 		// because we need to get the commit ts from the extension field.
 		c.codecCfg.EnableTiDBExtension = true
-		decoder = canal.NewCanalJSONTxnEventDecoder(c.codecCfg)
-		err = decoder.AddKeyValue(nil, content)
+		decoder, err = canal.NewBatchDecoder(ctx, c.codecCfg, nil)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		err := decoder.AddKeyValue(nil, content)
 		if err != nil {
 			return errors.Trace(err)
 		}

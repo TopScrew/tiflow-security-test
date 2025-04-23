@@ -94,7 +94,12 @@ func main() {
 	readerTiCDC = prepareKafkaConn(*topicTiCDC)
 	defer readerTiCDC.Close()
 
-	if !runAllTestCases(*testCaseDir, *dbConnMySQL, *dbConnTiDB) {
+	dbMySQL = prepareDBConn(KindMySQL, *dbConnMySQL)
+	defer dbMySQL.MustClose()
+	dbTiDB = prepareDBConn(KindTiDB, *dbConnTiDB)
+	defer dbTiDB.MustClose()
+
+	if !runAllTestCases(*testCaseDir) {
 		os.Exit(1)
 	}
 }

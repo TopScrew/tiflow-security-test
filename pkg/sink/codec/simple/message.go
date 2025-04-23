@@ -441,7 +441,7 @@ func decodeColumns(
 	if rawData == nil {
 		return nil
 	}
-	result := make([]*model.ColumnData, 0, len(tableInfo.Columns))
+	var result []*model.ColumnData
 	for _, info := range tableInfo.Columns {
 		value, ok := rawData[info.Name.O]
 		if !ok {

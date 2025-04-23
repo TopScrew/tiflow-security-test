@@ -14,13 +14,12 @@
 package canal
 
 import (
-	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/pingcap/log"
 	timodel "github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerrors "github.com/pingcap/tiflow/pkg/errors"
@@ -38,8 +37,6 @@ type canalJSONMessageInterface interface {
 	getSchema() *string
 	getTable() *string
 	getCommitTs() uint64
-	getPhysicalTableID() int64
-	getTableID() int64
 	getQuery() string
 	getOld() map[string]interface{}
 	getData() map[string]interface{}
@@ -84,14 +81,6 @@ func (c *JSONMessage) getTable() *string {
 
 // for JSONMessage, we lost the commitTs.
 func (c *JSONMessage) getCommitTs() uint64 {
-	return 0
-}
-
-func (c *JSONMessage) getTableID() int64 {
-	return 0
-}
-
-func (c *JSONMessage) getPhysicalTableID() int64 {
 	return 0
 }
 
@@ -165,148 +154,36 @@ func (c *canalJSONMessageWithTiDBExtension) getCommitTs() uint64 {
 	return c.Extensions.CommitTs
 }
 
-func (b *batchDecoder) queryTableInfo(msg canalJSONMessageInterface) *model.TableInfo {
-	schema := *msg.getSchema()
-	table := *msg.getTable()
-	cacheKey := tableKey{
-		schema: schema,
-		table:  table,
-	}
-	tableInfo, ok := b.tableInfoCache[cacheKey]
-	if !ok {
-		partitionInfo := b.partitionInfoCache[cacheKey]
-		tableInfo = newTableInfo(msg, partitionInfo)
-		tableInfo.ID = b.tableIDAllocator.AllocateTableID(schema, table)
-		if tableInfo.Partition != nil {
-			for idx, partition := range tableInfo.Partition.Definitions {
-				partitionID := b.tableIDAllocator.AllocatePartitionID(schema, table, partition.Name.O)
-				tableInfo.Partition.Definitions[idx].ID = partitionID
-			}
-		}
-		b.tableInfoCache[cacheKey] = tableInfo
-	}
-	return tableInfo
-}
-
-func newTableInfo(msg canalJSONMessageInterface, partitionInfo *timodel.PartitionInfo) *model.TableInfo {
-	schema := *msg.getSchema()
-	table := *msg.getTable()
-	tidbTableInfo := &timodel.TableInfo{}
-	tidbTableInfo.Name = pmodel.NewCIStr(table)
-
-	rawColumns := msg.getData()
-	pkNames := msg.pkNameSet()
-	mysqlType := msg.getMySQLType()
-	setColumnInfos(tidbTableInfo, rawColumns, mysqlType, pkNames)
-	setIndexes(tidbTableInfo, pkNames)
-	tidbTableInfo.Partition = partitionInfo
-	return model.WrapTableInfo(100, schema, 1000, tidbTableInfo)
-}
-
-func (b *batchDecoder) setPhysicalTableID(event *model.RowChangedEvent, physicalTableID int64) error {
-	if physicalTableID != 0 {
-		event.PhysicalTableID = physicalTableID
-		return nil
-	}
-	if event.TableInfo.Partition == nil {
-		event.PhysicalTableID = event.TableInfo.ID
-		return nil
-	}
-	switch event.TableInfo.Partition.Type {
-	case pmodel.PartitionTypeRange:
-		targetColumnID := event.TableInfo.ForceGetColumnIDByName(strings.ReplaceAll(event.TableInfo.Partition.Expr, "`", ""))
-		columns := event.Columns
-		if columns == nil {
-			columns = event.PreColumns
-		}
-		var columnValue string
-		for _, col := range columns {
-			if col.ColumnID == targetColumnID {
-				columnValue = model.ColumnValueString(col.Value)
-				break
-			}
-		}
-		for _, partition := range event.TableInfo.Partition.Definitions {
-			lessThan := partition.LessThan[0]
-			if lessThan == "MAXVALUE" {
-				event.PhysicalTableID = partition.ID
-				return nil
-			}
-			if len(columnValue) < len(lessThan) {
-				event.PhysicalTableID = partition.ID
-				return nil
-			}
-			if strings.Compare(columnValue, lessThan) == -1 {
-				event.PhysicalTableID = partition.ID
-				return nil
-			}
-		}
-		return fmt.Errorf("cannot found partition for column value %s", columnValue)
-	// todo: support following rule if meet the corresponding workload
-	case pmodel.PartitionTypeHash:
-		targetColumnID := event.TableInfo.ForceGetColumnIDByName(strings.ReplaceAll(event.TableInfo.Partition.Expr, "`", ""))
-		columns := event.Columns
-		if columns == nil {
-			columns = event.PreColumns
-		}
-		var columnValue int64
-		for _, col := range columns {
-			if col.ColumnID == targetColumnID {
-				columnValue = col.Value.(int64)
-				break
-			}
-		}
-		result := columnValue % int64(len(event.TableInfo.Partition.Definitions))
-		partitionID := event.TableInfo.GetPartitionInfo().Definitions[result].ID
-		event.PhysicalTableID = partitionID
-		return nil
-	case pmodel.PartitionTypeKey:
-	case pmodel.PartitionTypeList:
-	case pmodel.PartitionTypeNone:
-	default:
-	}
-	return fmt.Errorf("manually set partition id for partition type %s not supported yet", event.TableInfo.Partition.Type)
-}
-
-func (b *batchDecoder) canalJSONMessage2RowChange() (*model.RowChangedEvent, error) {
-	msg := b.msg
+func canalJSONMessage2RowChange(msg canalJSONMessageInterface) (*model.RowChangedEvent, error) {
 	result := new(model.RowChangedEvent)
-	result.TableInfo = b.queryTableInfo(msg)
 	result.CommitTs = msg.getCommitTs()
-
 	mysqlType := msg.getMySQLType()
 	var err error
 	if msg.eventType() == canal.EventType_DELETE {
 		// for `DELETE` event, `data` contain the old data, set it as the `PreColumns`
-		result.PreColumns, err = canalJSONColumnMap2RowChangeColumns(msg.getData(), mysqlType, result.TableInfo)
-		if err != nil {
-			return nil, err
-		}
-		err = b.setPhysicalTableID(result, msg.getPhysicalTableID())
-		if err != nil {
-			return nil, err
-		}
-		return result, nil
+		preCols, err := canalJSONColumnMap2RowChangeColumns(msg.getData(), mysqlType)
+		result.TableInfo = model.BuildTableInfoWithPKNames4Test(*msg.getSchema(), *msg.getTable(), preCols, msg.pkNameSet())
+		result.PreColumns = model.Columns2ColumnDatas(preCols, result.TableInfo)
+		return result, err
 	}
 
 	// for `INSERT` and `UPDATE`, `data` contain fresh data, set it as the `Columns`
-	result.Columns, err = canalJSONColumnMap2RowChangeColumns(msg.getData(), mysqlType, result.TableInfo)
+	cols, err := canalJSONColumnMap2RowChangeColumns(msg.getData(), mysqlType)
+	result.TableInfo = model.BuildTableInfoWithPKNames4Test(*msg.getSchema(), *msg.getTable(), cols, msg.pkNameSet())
+	result.Columns = model.Columns2ColumnDatas(cols, result.TableInfo)
 	if err != nil {
 		return nil, err
 	}
 
 	// for `UPDATE`, `old` contain old data, set it as the `PreColumns`
 	if msg.eventType() == canal.EventType_UPDATE {
-		preCols, err := canalJSONColumnMap2RowChangeColumns(msg.getOld(), mysqlType, result.TableInfo)
-		if err != nil {
-			return nil, err
-		}
-		if len(preCols) < len(result.Columns) {
-			newPreCols := make([]*model.ColumnData, 0, len(preCols))
+		preCols, err := canalJSONColumnMap2RowChangeColumns(msg.getOld(), mysqlType)
+		if len(preCols) < len(cols) {
+			newPreCols := make([]*model.Column, 0, len(preCols))
 			j := 0
 			// Columns are ordered by name
-			for _, col := range result.Columns {
-				if j < len(preCols) && col.ColumnID == preCols[j].ColumnID {
+			for _, col := range cols {
+				if j < len(preCols) && col.Name == preCols[j].Name {
 					newPreCols = append(newPreCols, preCols[j])
 					j += 1
 				} else {
@@ -315,48 +192,45 @@ func (b *batchDecoder) canalJSONMessage2RowChange() (*model.RowChangedEvent, err
 			}
 			preCols = newPreCols
 		}
-		result.PreColumns = preCols
-		if len(preCols) != len(result.Columns) {
-			log.Panic("column count mismatch", zap.Any("preCols", preCols), zap.Any("cols", result.Columns))
+		if len(preCols) != len(cols) {
+			log.Panic("column count mismatch", zap.Any("preCols", preCols), zap.Any("cols", cols))
+		}
+		result.PreColumns = model.Columns2ColumnDatas(preCols, result.TableInfo)
+		if err != nil {
+			return nil, err
 		}
 	}
-	err = b.setPhysicalTableID(result, msg.getPhysicalTableID())
-	if err != nil {
-		return nil, err
-	}
+
 	return result, nil
 }
 
-func canalJSONColumnMap2RowChangeColumns(
-	cols map[string]interface{},
-	mysqlType map[string]string,
-	tableInfo *model.TableInfo,
-) ([]*model.ColumnData, error) {
-	result := make([]*model.ColumnData, 0, len(cols))
-	for _, columnInfo := range tableInfo.Columns {
-		name := columnInfo.Name.O
-		value, ok := cols[name]
-		if !ok {
-			continue
-		}
+func canalJSONColumnMap2RowChangeColumns(cols map[string]interface{}, mysqlType map[string]string) ([]*model.Column, error) {
+	result := make([]*model.Column, 0, len(cols))
+	for name, value := range cols {
 		mysqlTypeStr, ok := mysqlType[name]
 		if !ok {
 			// this should not happen, else we have to check encoding for mysqlType.
 			return nil, cerrors.ErrCanalDecodeFailed.GenWithStack(
 				"mysql type does not found, column: %+v, mysqlType: %+v", name, mysqlType)
 		}
-		col := canalJSONFormatColumn(columnInfo.ID, value, mysqlTypeStr)
+		col := canalJSONFormatColumn(value, name, mysqlTypeStr)
 		result = append(result, col)
 	}
-
+	if len(result) == 0 {
+		return nil, nil
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return strings.Compare(result[i].Name, result[j].Name) > 0
+	})
 	return result, nil
 }
 
-func canalJSONFormatColumn(columnID int64, value interface{}, mysqlTypeStr string) *model.ColumnData {
+func canalJSONFormatColumn(value interface{}, name string, mysqlTypeStr string) *model.Column {
 	mysqlType := utils.ExtractBasicMySQLType(mysqlTypeStr)
-	result := &model.ColumnData{
-		ColumnID: columnID,
-		Value:    value,
+	result := &model.Column{
+		Type:  mysqlType,
+		Name:  name,
+		Value: value,
 	}
 	if result.Value == nil {
 		return result

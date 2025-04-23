@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -34,10 +35,13 @@ import (
 )
 
 func main() {
+	debug.SetMemoryLimit(14 * 1024 * 1024 * 1024)
+
 	var (
 		upstreamURIStr string
 		configFile     string
 	)
+
 	groupID := fmt.Sprintf("ticdc_kafka_consumer_%s", uuid.New().String())
 	consumerOption := newOption()
 	flag.StringVar(&configFile, "config", "", "config file for changefeed")
@@ -83,11 +87,10 @@ func main() {
 	consumer := newConsumer(ctx, consumerOption)
 	var wg sync.WaitGroup
 	if consumerOption.enableProfiling {
-		log.Info("profiling is enabled")
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err = http.ListenAndServe(":6060", nil); err != nil {
+			if err = http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
 				log.Panic("cannot start the pprof", zap.Error(err))
 			}
 		}()
