@@ -23,7 +23,6 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/kv/sharedconn"
 	"github.com/pingcap/tiflow/pkg/chann"
-	cerrors "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/pingcap/tiflow/pkg/version"
 	"go.uber.org/zap"
@@ -91,31 +90,12 @@ func newStream(ctx context.Context, c *SharedClient, g *errgroup.Group, r *reque
 			if err := waitForPreFetching(); err != nil {
 				return err
 			}
-			var regionErr error
-			if err := version.CheckStoreVersion(ctx, c.pd, r.storeID); err != nil {
-				log.Info("event feed check store version fails",
-					zap.String("namespace", c.changefeed.Namespace),
-					zap.String("changefeed", c.changefeed.ID),
-					zap.Uint64("streamID", stream.streamID),
-					zap.Uint64("storeID", r.storeID),
-					zap.String("addr", r.storeAddr),
-					zap.Error(err))
-				if errors.Cause(err) == context.Canceled {
-					return nil
-				} else if cerrors.Is(err, cerrors.ErrGetAllStoresFailed) {
-					regionErr = &getStoreErr{}
-				} else {
-					regionErr = &sendRequestToStoreErr{}
-				}
-			} else {
-				if canceled := stream.run(ctx, c, r); canceled {
-					return nil
-				}
-				regionErr = &sendRequestToStoreErr{}
+			if canceled := stream.run(ctx, c, r); canceled {
+				return nil
 			}
 			for _, m := range stream.clearStates() {
 				for _, state := range m {
-					state.markStopped(regionErr)
+					state.markStopped(&sendRequestToStoreErr{})
 					sfEvent := newEventItem(nil, state, stream)
 					slot := hashRegionID(state.region.verID.GetID(), len(c.workers))
 					_ = c.workers[slot].sendEvent(ctx, sfEvent)
@@ -128,7 +108,7 @@ func newStream(ctx context.Context, c *SharedClient, g *errgroup.Group, r *reque
 					// It means it's a special task for stopping the table.
 					continue
 				}
-				c.onRegionFail(newRegionErrorInfo(region, regionErr))
+				c.onRegionFail(newRegionErrorInfo(region, &sendRequestToStoreErr{}))
 			}
 			if err := util.Hang(ctx, time.Second); err != nil {
 				return err
@@ -153,6 +133,17 @@ func (s *requestedStream) run(ctx context.Context, c *SharedClient, rs *requeste
 		default:
 			return false
 		}
+	}
+
+	if err := version.CheckStoreVersion(ctx, c.pd, rs.storeID); err != nil {
+		log.Info("event feed check store version fails",
+			zap.String("namespace", c.changefeed.Namespace),
+			zap.String("changefeed", c.changefeed.ID),
+			zap.Uint64("streamID", s.streamID),
+			zap.Uint64("storeID", rs.storeID),
+			zap.String("addr", rs.storeAddr),
+			zap.Error(err))
+		return isCanceled()
 	}
 
 	log.Info("event feed going to create grpc stream",
@@ -318,11 +309,8 @@ func (s *requestedStream) send(ctx context.Context, c *SharedClient, rs *request
 		if region.isStopped() {
 			if s.multiplexing != nil {
 				req := &cdcpb.ChangeDataRequest{
-					Header:    &cdcpb.Header{ClusterId: c.clusterID, TicdcVersion: version.ReleaseSemver()},
 					RequestId: uint64(subscriptionID),
-					Request: &cdcpb.ChangeDataRequest_Deregister_{
-						Deregister: &cdcpb.ChangeDataRequest_Deregister{},
-					},
+					Request:   &cdcpb.ChangeDataRequest_Deregister_{},
 				}
 				if err = s.multiplexing.Client().Send(req); err != nil {
 					log.Warn("event feed send deregister request to grpc stream failed",

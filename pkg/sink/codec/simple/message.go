@@ -145,7 +145,7 @@ func newColumnSchema(col *timodel.ColumnInfo) *columnSchema {
 		tp.Decimal = col.GetDecimal()
 	}
 
-	defaultValue := col.GetDefaultValue()
+	defaultValue := model.GetColumnDefaultValue(col)
 	if defaultValue != nil && col.GetType() == mysql.TypeBit {
 		defaultValue = common.MustBinaryLiteralToInt([]byte(defaultValue.(string)))
 	}

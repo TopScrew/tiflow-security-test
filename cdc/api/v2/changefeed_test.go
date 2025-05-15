@@ -110,7 +110,7 @@ func TestCreateChangefeed(t *testing.T) {
 		ID:        changeFeedID.ID,
 		Namespace: changeFeedID.Namespace,
 		SinkURI:   blackholeSink,
-		PDAddrs:   []string{"http://127.0.0.1:2379"}, // arbitrary pd address to trigger create new pd client
+		PDAddrs:   []string{},
 	}
 	body, err := json.Marshal(&cfConfig)
 	require.Nil(t, err)
@@ -647,8 +647,6 @@ func TestVerifyTable(t *testing.T) {
 
 	// case 2: kv create failed
 	updateCfg := getDefaultVerifyTableConfig()
-	// arbitrary pd address to trigger create new pd client
-	updateCfg.PDAddrs = []string{"http://127.0.0.1:2379"}
 	body, err := json.Marshal(&updateCfg)
 	require.Nil(t, err)
 	helpers.EXPECT().
@@ -1037,10 +1035,6 @@ func TestChangefeedSynced(t *testing.T) {
 	statusProvider.err = nil
 	statusProvider.changefeedInfo = cfInfo
 	{
-		cfg := getDefaultVerifyTableConfig()
-		// arbitrary pd address to trigger create new pd client
-		cfg.PDAddrs = []string{"http://127.0.0.1:2379"}
-		body, _ := json.Marshal(&cfg)
 		helpers.EXPECT().getPDClient(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, cerrors.ErrAPIGetPDClientFailed).Times(1)
 		// case3: pd is offline，resolvedTs - checkpointTs > 15s
 		statusProvider.changeFeedSyncedStatus = &model.ChangeFeedSyncedStatusForAPI{
@@ -1053,7 +1047,7 @@ func TestChangefeedSynced(t *testing.T) {
 			context.Background(),
 			syncedInfo.method,
 			fmt.Sprintf(syncedInfo.url, validID),
-			bytes.NewReader(body),
+			nil,
 		)
 		router.ServeHTTP(w, req)
 		require.Equal(t, http.StatusOK, w.Code)
@@ -1066,10 +1060,6 @@ func TestChangefeedSynced(t *testing.T) {
 	}
 
 	{
-		cfg := getDefaultVerifyTableConfig()
-		// arbitrary pd address to trigger create new pd client
-		cfg.PDAddrs = []string{"http://127.0.0.1:2379"}
-		body, _ := json.Marshal(&cfg)
 		helpers.EXPECT().getPDClient(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, cerrors.ErrAPIGetPDClientFailed).Times(1)
 		// case4: pd is offline，resolvedTs - checkpointTs < 15s
 		statusProvider.changeFeedSyncedStatus = &model.ChangeFeedSyncedStatusForAPI{
@@ -1082,7 +1072,7 @@ func TestChangefeedSynced(t *testing.T) {
 			context.Background(),
 			syncedInfo.method,
 			fmt.Sprintf(syncedInfo.url, validID),
-			bytes.NewReader(body),
+			nil,
 		)
 		router.ServeHTTP(w, req)
 		require.Equal(t, http.StatusOK, w.Code)
@@ -1101,10 +1091,6 @@ func TestChangefeedSynced(t *testing.T) {
 	pdClient.logicTime = 1000
 	pdClient.timestamp = 1701153217279
 	{
-		cfg := getDefaultVerifyTableConfig()
-		// arbitrary pd address to trigger create new pd client
-		cfg.PDAddrs = []string{"http://127.0.0.1:2379"}
-		body, _ := json.Marshal(&cfg)
 		// case5: pdTs - lastSyncedTs > 5min, pdTs - checkpointTs < 15s
 		statusProvider.changeFeedSyncedStatus = &model.ChangeFeedSyncedStatusForAPI{
 			CheckpointTs:     1701153217209 << 18,
@@ -1116,7 +1102,7 @@ func TestChangefeedSynced(t *testing.T) {
 			context.Background(),
 			syncedInfo.method,
 			fmt.Sprintf(syncedInfo.url, validID),
-			bytes.NewReader(body),
+			nil,
 		)
 		router.ServeHTTP(w, req)
 		require.Equal(t, http.StatusOK, w.Code)
@@ -1128,10 +1114,6 @@ func TestChangefeedSynced(t *testing.T) {
 	}
 
 	{
-		cfg := getDefaultVerifyTableConfig()
-		// arbitrary pd address to trigger create new pd client
-		cfg.PDAddrs = []string{"http://127.0.0.1:2379"}
-		body, _ := json.Marshal(&cfg)
 		// case6: pdTs - lastSyncedTs > 5min, pdTs - checkpointTs > 15s, resolvedTs - checkpointTs < 15s
 		statusProvider.changeFeedSyncedStatus = &model.ChangeFeedSyncedStatusForAPI{
 			CheckpointTs:     1701153201279 << 18,
@@ -1143,7 +1125,7 @@ func TestChangefeedSynced(t *testing.T) {
 			context.Background(),
 			syncedInfo.method,
 			fmt.Sprintf(syncedInfo.url, validID),
-			bytes.NewReader(body),
+			nil,
 		)
 		router.ServeHTTP(w, req)
 		require.Equal(t, http.StatusOK, w.Code)
@@ -1160,10 +1142,6 @@ func TestChangefeedSynced(t *testing.T) {
 	}
 
 	{
-		cfg := getDefaultVerifyTableConfig()
-		// arbitrary pd address to trigger create new pd client
-		cfg.PDAddrs = []string{"http://127.0.0.1:2379"}
-		body, _ := json.Marshal(&cfg)
 		// case7: pdTs - lastSyncedTs > 5min, pdTs - checkpointTs > 15s, resolvedTs - checkpointTs > 15s
 		statusProvider.changeFeedSyncedStatus = &model.ChangeFeedSyncedStatusForAPI{
 			CheckpointTs:     1701153201279 << 18,
@@ -1175,7 +1153,7 @@ func TestChangefeedSynced(t *testing.T) {
 			context.Background(),
 			syncedInfo.method,
 			fmt.Sprintf(syncedInfo.url, validID),
-			bytes.NewReader(body),
+			nil,
 		)
 		router.ServeHTTP(w, req)
 		require.Equal(t, http.StatusOK, w.Code)
@@ -1187,10 +1165,6 @@ func TestChangefeedSynced(t *testing.T) {
 	}
 
 	{
-		cfg := getDefaultVerifyTableConfig()
-		// arbitrary pd address to trigger create new pd client
-		cfg.PDAddrs = []string{"http://127.0.0.1:2379"}
-		body, _ := json.Marshal(&cfg)
 		// case8: pdTs - lastSyncedTs < 5min
 		statusProvider.changeFeedSyncedStatus = &model.ChangeFeedSyncedStatusForAPI{
 			CheckpointTs:     1701153217279 << 18,
@@ -1202,7 +1176,7 @@ func TestChangefeedSynced(t *testing.T) {
 			context.Background(),
 			syncedInfo.method,
 			fmt.Sprintf(syncedInfo.url, validID),
-			bytes.NewReader(body),
+			nil,
 		)
 		router.ServeHTTP(w, req)
 		require.Equal(t, http.StatusOK, w.Code)

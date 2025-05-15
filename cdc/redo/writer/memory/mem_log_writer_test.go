@@ -106,30 +106,12 @@ func testWriteEvents(t *testing.T, events []writer.RedoEvent) {
 
 	functions := map[string]func(error){
 		"WriteEvents": func(expected error) {
-			if expected == nil {
-				err := lw.WriteEvents(ctx, events...)
-				require.NoError(t, err)
-			} else {
-				require.Eventually(
-					t, func() bool {
-						err := lw.WriteEvents(ctx, events...)
-						return errors.Is(errors.Cause(err), expected)
-					}, time.Second*2, time.Microsecond*10,
-				)
-			}
+			err := lw.WriteEvents(ctx, events...)
+			require.ErrorIs(t, errors.Cause(err), expected)
 		},
 		"FlushLog": func(expected error) {
-			if expected == nil {
-				err := lw.FlushLog(ctx)
-				require.NoError(t, err)
-			} else {
-				require.Eventually(
-					t, func() bool {
-						err := lw.WriteEvents(ctx, events...)
-						return errors.Is(errors.Cause(err), expected)
-					}, time.Second*2, time.Microsecond*10,
-				)
-			}
+			err := lw.FlushLog(ctx)
+			require.ErrorIs(t, errors.Cause(err), expected)
 		},
 	}
 	firstCall := true
