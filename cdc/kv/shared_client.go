@@ -85,6 +85,7 @@ var (
 	metricFeedDuplicateRequestCounter = eventFeedErrorCounter.WithLabelValues("DuplicateRequest")
 	metricFeedUnknownErrorCounter     = eventFeedErrorCounter.WithLabelValues("Unknown")
 	metricFeedRPCCtxUnavailable       = eventFeedErrorCounter.WithLabelValues("RPCCtxUnavailable")
+	metricGetStoreErr                 = eventFeedErrorCounter.WithLabelValues("GetStoreErr")
 	metricStoreSendRequestErr         = eventFeedErrorCounter.WithLabelValues("SendRequestToStore")
 	metricKvIsBusyCounter             = eventFeedErrorCounter.WithLabelValues("KvIsBusy")
 	metricKvCongestedCounter          = eventFeedErrorCounter.WithLabelValues("KvCongested")
@@ -107,6 +108,10 @@ func (e *rpcCtxUnavailableErr) Error() string {
 	return fmt.Sprintf("cannot get rpcCtx for region %v. ver:%v, confver:%v",
 		e.verID.GetID(), e.verID.GetVer(), e.verID.GetConfVer())
 }
+
+type getStoreErr struct{}
+
+func (e *getStoreErr) Error() string { return "get store error" }
 
 type sendRequestToStoreErr struct{}
 
@@ -189,7 +194,6 @@ type rangeTask struct {
 // requestedStore represents a store that has been connected.
 // A store may have multiple streams.
 type requestedStore struct {
-	storeID   uint64
 	storeAddr string
 	// Use to select a stream to send request.
 	nextStream atomic.Uint32
@@ -436,7 +440,7 @@ func (s *SharedClient) handleRegions(ctx context.Context, eg *errgroup.Group) er
 				continue
 			}
 
-			store := s.getStore(ctx, eg, region.rpcCtx.Peer.StoreId, region.rpcCtx.Addr)
+			store := s.getStore(ctx, eg, region.rpcCtx.Addr)
 			stream := store.getStream()
 			stream.requests.In() <- region
 
@@ -447,7 +451,6 @@ func (s *SharedClient) handleRegions(ctx context.Context, eg *errgroup.Group) er
 				zap.Any("subscriptionID", region.subscribedTable.subscriptionID),
 				zap.Uint64("regionID", region.verID.GetID()),
 				zap.String("span", region.span.String()),
-				zap.Uint64("storeID", store.storeID),
 				zap.String("addr", store.storeAddr))
 		}
 	}
@@ -476,14 +479,13 @@ func (s *SharedClient) attachRPCContextForRegion(ctx context.Context, region reg
 
 // getStore gets a requestedStore from requestedStores by storeAddr.
 func (s *SharedClient) getStore(
-	ctx context.Context, g *errgroup.Group,
-	storeID uint64, storeAddr string,
+	ctx context.Context, g *errgroup.Group, storeAddr string,
 ) *requestedStore {
 	var rs *requestedStore
 	if rs = s.stores[storeAddr]; rs != nil {
 		return rs
 	}
-	rs = &requestedStore{storeID: storeID, storeAddr: storeAddr}
+	rs = &requestedStore{storeAddr: storeAddr}
 	s.stores[storeAddr] = rs
 	for i := uint(0); i < s.config.KVClient.GrpcStreamConcurrent; i++ {
 		stream := newStream(ctx, s, g, rs)
@@ -737,6 +739,13 @@ func (s *SharedClient) doHandleError(ctx context.Context, errInfo regionErrorInf
 		return nil
 	case *rpcCtxUnavailableErr:
 		metricFeedRPCCtxUnavailable.Inc()
+		s.scheduleRangeRequest(ctx, errInfo.span, errInfo.subscribedTable)
+		return nil
+	case *getStoreErr:
+		metricGetStoreErr.Inc()
+		bo := tikv.NewBackoffer(ctx, tikvRequestMaxBackoff)
+		// cannot get the store the region belongs to, so we need to reload the region.
+		s.regionCache.OnSendFail(bo, errInfo.rpcCtx, true, err)
 		s.scheduleRangeRequest(ctx, errInfo.span, errInfo.subscribedTable)
 		return nil
 	case *sendRequestToStoreErr:
