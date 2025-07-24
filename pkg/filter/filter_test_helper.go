@@ -15,14 +15,13 @@ package filter
 
 import (
 	"testing"
-	"time"
 
 	ticonfig "github.com/pingcap/tidb/pkg/config"
 	tiddl "github.com/pingcap/tidb/pkg/ddl"
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/kv"
 	timeta "github.com/pingcap/tidb/pkg/meta"
-	timodel "github.com/pingcap/tidb/pkg/meta/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/store/mockstore"
 	"github.com/pingcap/tidb/pkg/testkit"
@@ -47,7 +46,7 @@ func newTestHelper(t *testing.T) *testHelper {
 	ticonfig.UpdateGlobal(func(conf *ticonfig.Config) {
 		conf.AlterPrimaryKey = true
 	})
-	session.SetSchemaLease(time.Second)
+	session.SetSchemaLease(0)
 	session.DisableStats4Test()
 	domain, err := session.BootstrapSession(store)
 	require.Nil(t, err)
@@ -88,10 +87,10 @@ func (s *testHelper) getTk() *testkit.TestKit {
 }
 
 // getCurrentMeta return the current meta snapshot
-func (s *testHelper) getCurrentMeta() timeta.Reader {
+func (s *testHelper) getCurrentMeta() *timeta.Meta {
 	ver, err := s.storage.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(s.t, err)
-	return timeta.NewReader(s.storage.GetSnapshot(ver))
+	return timeta.NewSnapshotMeta(s.storage.GetSnapshot(ver))
 }
 
 // close closes the helper

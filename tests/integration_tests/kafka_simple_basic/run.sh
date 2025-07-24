@@ -22,9 +22,6 @@ function run() {
 
 	cd $WORK_DIR
 
-	# upstream TiDB disable the cluster index
-	run_sql "set global tidb_enable_clustered_index=0;" ${UP_TIDB_HOST} ${UP_TIDB_PORT}
-
 	# upstream tidb cluster enable row level checksum
 	run_sql "set global tidb_enable_row_level_checksum=true" ${UP_TIDB_HOST} ${UP_TIDB_PORT}
 
@@ -36,7 +33,7 @@ function run() {
 	run_cdc_cli changefeed create --sink-uri="$SINK_URI" --config="$CUR/conf/changefeed.toml" -c "simple-basic"
 	sleep 5 # wait for changefeed to start
 
-	cdc_kafka_consumer --upstream-uri $SINK_URI --downstream-uri="mysql://root@127.0.0.1:3306/?safe-mode=true&batch-dml-enable=false" --upstream-tidb-dsn="root@tcp(${UP_TIDB_HOST}:${UP_TIDB_PORT})/?" --config="$CUR/conf/changefeed.toml" 2>&1 &
+	run_kafka_consumer $WORK_DIR $SINK_URI
 
 	# pre execute some ddls
 	run_sql_file $CUR/data/pre_ddl.sql ${UP_TIDB_HOST} ${UP_TIDB_PORT}
@@ -50,13 +47,11 @@ function run() {
 	run_sql_file $CUR/data/data.sql ${UP_TIDB_HOST} ${UP_TIDB_PORT}
 
 	# sync_diff can't check non-exist table, so we check expected tables are created in downstream first
-	run_sql "CREATE TABLE test.finish_mark1 (a int primary key);" ${UP_TIDB_HOST} ${UP_TIDB_PORT}
-	check_table_exists test.finish_mark1 ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT} 200
+	check_table_exists test.finish_mark ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT} 200
 	check_sync_diff $WORK_DIR $CUR/conf/diff_config.toml
 
 	run_sql_file $CUR/data/data_gbk.sql ${UP_TIDB_HOST} ${UP_TIDB_PORT}
-	run_sql "CREATE TABLE test.finish_mark2 (a int primary key);" ${UP_TIDB_HOST} ${UP_TIDB_PORT}
-	check_table_exists test.finish_mark2 ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT} 200
+	check_table_exists test.finish_mark ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT} 200
 	check_sync_diff $WORK_DIR $CUR/conf/diff_config.toml
 
 	cleanup_process $CDC_BINARY

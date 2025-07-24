@@ -23,11 +23,10 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	tidbkv "github.com/pingcap/tidb/pkg/kv"
-	timodel "github.com/pingcap/tidb/pkg/meta/model"
-	"github.com/pingcap/tiflow/cdc/entry/schema"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	schema "github.com/pingcap/tiflow/cdc/entry/schema"
 	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/pkg/ddl"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/retry"
@@ -399,23 +398,6 @@ func (s *schemaStorage) BuildDDLEvents(
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-	case timodel.ActionCreateTables:
-		if job.BinlogInfo != nil && job.BinlogInfo.MultipleTableInfos != nil {
-			querys, err := ddl.SplitQueries(job.Query)
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			multiTableInfos := job.BinlogInfo.MultipleTableInfos
-			for index, tableInfo := range multiTableInfos {
-				newTableInfo := model.WrapTableInfo(job.SchemaID, job.SchemaName, job.BinlogInfo.FinishedTS, tableInfo)
-				job.Query = querys[index]
-				event := new(model.DDLEvent)
-				event.FromJob(job, nil, newTableInfo)
-				ddlEvents = append(ddlEvents, event)
-			}
-		} else {
-			return nil, errors.Errorf("there is no multiple table infos in the create tables job: %s", job)
-		}
 	default:
 		// parse preTableInfo
 		preSnap, err := s.GetSnapshot(ctx, job.BinlogInfo.FinishedTS-1)
@@ -465,33 +447,28 @@ func (s *schemaStorage) BuildDDLEvents(
 	return ddlEvents, nil
 }
 
-// GetNewJobWithArgs returns a new job with the given args
-func GetNewJobWithArgs(job *timodel.Job, args timodel.JobArgs) (*timodel.Job, error) {
-	job.FillArgs(args)
-	bytes, err := job.Encode(true)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	encodedJob := &timodel.Job{}
-	if err = encodedJob.Decode(bytes); err != nil {
-		return nil, errors.Trace(err)
-	}
-	return encodedJob, nil
-}
-
 // TODO: find a better way to refactor this function.
 // buildRenameEvents gets a list of DDLEvent from a rename tables DDL job.
 func (s *schemaStorage) buildRenameEvents(
 	ctx context.Context, job *timodel.Job,
 ) ([]*model.DDLEvent, error) {
-	var ddlEvents []*model.DDLEvent
-	args, err := timodel.GetRenameTablesArgs(job)
+	var (
+		oldSchemaIDs, newSchemaIDs, oldTableIDs []int64
+		newTableNames, oldSchemaNames           []*timodel.CIStr
+		ddlEvents                               []*model.DDLEvent
+	)
+	err := job.DecodeArgs(&oldSchemaIDs, &newSchemaIDs,
+		&newTableNames, &oldTableIDs, &oldSchemaNames)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	multiTableInfos := job.BinlogInfo.MultipleTableInfos
-	if len(multiTableInfos) != len(args.RenameTableInfos) {
+	if len(multiTableInfos) != len(oldSchemaIDs) ||
+		len(multiTableInfos) != len(newSchemaIDs) ||
+		len(multiTableInfos) != len(newTableNames) ||
+		len(multiTableInfos) != len(oldTableIDs) ||
+		len(multiTableInfos) != len(oldSchemaNames) {
 		return nil, cerror.ErrInvalidDDLJob.GenWithStackByArgs(job.ID)
 	}
 
@@ -501,14 +478,13 @@ func (s *schemaStorage) buildRenameEvents(
 	}
 
 	for i, tableInfo := range multiTableInfos {
-		info := args.RenameTableInfos[i]
-		newSchema, ok := preSnap.SchemaByID(info.NewSchemaID)
+		newSchema, ok := preSnap.SchemaByID(newSchemaIDs[i])
 		if !ok {
 			return nil, cerror.ErrSnapshotSchemaNotFound.GenWithStackByArgs(
-				info.NewSchemaID)
+				newSchemaIDs[i])
 		}
 		newSchemaName := newSchema.Name.O
-		oldSchemaName := info.OldSchemaName.O
+		oldSchemaName := oldSchemaNames[i].O
 		event := new(model.DDLEvent)
 		preTableInfo, ok := preSnap.PhysicalTableByID(tableInfo.ID)
 		if !ok {
@@ -516,7 +492,7 @@ func (s *schemaStorage) buildRenameEvents(
 				job.TableID)
 		}
 
-		tableInfo := model.WrapTableInfo(info.NewSchemaID, newSchemaName,
+		tableInfo := model.WrapTableInfo(newSchemaIDs[i], newSchemaName,
 			job.BinlogInfo.FinishedTS, tableInfo)
 		event.FromJobWithArgs(job, preTableInfo, tableInfo, oldSchemaName, newSchemaName)
 		ddlEvents = append(ddlEvents, event)

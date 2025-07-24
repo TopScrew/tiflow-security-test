@@ -14,6 +14,7 @@
 package filter
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 
@@ -22,11 +23,12 @@ import (
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/parser"
 	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	tfilter "github.com/pingcap/tidb/pkg/util/table-filter"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
@@ -79,12 +81,16 @@ func newExprFilterRule(
 
 // verifyAndInitRule will verify and init the rule.
 // It should only be called in dmlExprFilter's verify method.
-// We ask users to set these expr only in default sql mode,
-// so we just need to  verify each expr in default sql mode
-func (r *dmlExprFilterRule) verify(tableInfos []*model.TableInfo) error {
+func (r *dmlExprFilterRule) verify(tableInfos []*model.TableInfo, sqlMode string) error {
 	// verify expression filter rule syntax.
 	p := parser.New()
-	_, _, err := p.ParseSQL(completeExpression(r.config.IgnoreInsertValueExpr))
+	mode, err := mysql.GetSQLMode(sqlMode)
+	if err != nil {
+		log.Error("failed to get sql mode", zap.Error(err))
+		return cerror.ErrInvalidReplicaConfig.FastGenByArgs(fmt.Sprintf("invalid sqlMode %s", sqlMode))
+	}
+	p.SetSQLMode(mode)
+	_, _, err = p.ParseSQL(completeExpression(r.config.IgnoreInsertValueExpr))
 	if err != nil {
 		log.Error("failed to parse expression", zap.Error(err))
 		return cerror.ErrExpressionParseFailed.
@@ -231,11 +237,11 @@ func (r *dmlExprFilterRule) getSimpleExprOfTable(
 	expr string,
 	ti *model.TableInfo,
 ) (expression.Expression, error) {
-	e, err := expression.ParseSimpleExprWithTableInfo(r.sessCtx.GetExprCtx(), expr, ti.TableInfo)
+	e, err := expression.ParseSimpleExprWithTableInfo(r.sessCtx, expr, ti.TableInfo)
 	if err != nil {
 		// If an expression contains an unknown column,
 		// we return an error and stop the changefeed.
-		if plannererrors.ErrUnknownColumn.Equal(err) {
+		if core.ErrUnknownColumn.Equal(err) {
 			log.Error("meet unknown column when generating expression",
 				zap.String("expression", expr),
 				zap.Error(err))
@@ -332,27 +338,27 @@ func (r *dmlExprFilterRule) buildRowWithVirtualColumns(
 		return row, nil
 	}
 
-	columns, _, err := expression.ColumnInfos2ColumnsAndNames(r.sessCtx.GetExprCtx(),
+	columns, _, err := expression.ColumnInfos2ColumnsAndNames(r.sessCtx,
 		timodel.CIStr{} /* unused */, tableInfo.Name, tableInfo.Columns, tableInfo.TableInfo)
 	if err != nil {
 		return chunk.Row{}, err
 	}
 
-	vColOffsets, vColFts := collectVirtualColumnOffsetsAndTypes(r.sessCtx.GetExprCtx().GetEvalCtx(), columns)
-	err = table.FillVirtualColumnValue(vColFts, vColOffsets, columns, tableInfo.Columns, r.sessCtx.GetExprCtx(), row.Chunk())
+	vColOffsets, vColFts := collectVirtualColumnOffsetsAndTypes(columns)
+	err = table.FillVirtualColumnValue(vColFts, vColOffsets, columns, tableInfo.Columns, r.sessCtx, row.Chunk())
 	if err != nil {
 		return chunk.Row{}, err
 	}
 	return row, nil
 }
 
-func collectVirtualColumnOffsetsAndTypes(ctx expression.EvalContext, cols []*expression.Column) ([]int, []*types.FieldType) {
+func collectVirtualColumnOffsetsAndTypes(cols []*expression.Column) ([]int, []*types.FieldType) {
 	var offsets []int
 	var fts []*types.FieldType
 	for i, col := range cols {
 		if col.VirtualExpr != nil {
 			offsets = append(offsets, i)
-			fts = append(fts, col.GetType(ctx))
+			fts = append(fts, col.GetType())
 		}
 	}
 	return offsets, fts
@@ -366,11 +372,12 @@ func (r *dmlExprFilterRule) skipDMLByExpression(
 	if len(rowData) == 0 || expr == nil {
 		return false, nil
 	}
+
 	row, err := r.buildRowWithVirtualColumns(rowData, tableInfo)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
-	d, err := expr.Eval(r.sessCtx.GetExprCtx().GetEvalCtx(), row)
+	d, err := expr.Eval(row)
 	if err != nil {
 		log.Error("failed to eval expression", zap.Error(err))
 		return false, errors.Trace(err)
@@ -382,7 +389,7 @@ func (r *dmlExprFilterRule) skipDMLByExpression(
 }
 
 func getColumnFromError(err error) string {
-	if !plannererrors.ErrUnknownColumn.Equal(err) {
+	if !core.ErrUnknownColumn.Equal(err) {
 		return err.Error()
 	}
 	column := strings.TrimSpace(strings.TrimPrefix(err.Error(),
@@ -393,14 +400,18 @@ func getColumnFromError(err error) string {
 
 // dmlExprFilter is a filter that filters DML events by SQL expression.
 type dmlExprFilter struct {
-	rules []*dmlExprFilterRule
+	rules   []*dmlExprFilterRule
+	sqlMODE string
 }
 
 func newExprFilter(
 	timezone string,
 	cfg *config.FilterConfig,
+	sqlMODE string,
 ) (*dmlExprFilter, error) {
-	res := &dmlExprFilter{}
+	res := &dmlExprFilter{
+		sqlMODE: sqlMODE,
+	}
 	sessCtx := utils.NewSessionCtx(map[string]string{
 		"time_zone": timezone,
 	})
@@ -428,7 +439,7 @@ func (f *dmlExprFilter) addRule(
 // verify checks if all rules in this filter is valid.
 func (f *dmlExprFilter) verify(tableInfos []*model.TableInfo) error {
 	for _, rule := range f.rules {
-		err := rule.verify(tableInfos)
+		err := rule.verify(tableInfos, f.sqlMODE)
 		if err != nil {
 			log.Error("failed to verify expression filter rule", zap.Error(err))
 			return errors.Trace(err)
@@ -453,14 +464,11 @@ func (f *dmlExprFilter) shouldSkipDML(
 	rawRow model.RowChangedDatums,
 	ti *model.TableInfo,
 ) (bool, error) {
-	if len(f.rules) == 0 {
-		return false, nil
-	}
 	// for defense purpose, normally the row and ti should not be nil.
 	if ti == nil || row == nil || rawRow.IsEmpty() {
 		return false, nil
 	}
-	rules := f.getRules(row.TableInfo.GetSchemaName(), row.TableInfo.GetTableName())
+	rules := f.getRules(row.Table.Schema, row.Table.Table)
 	for _, rule := range rules {
 		ignore, err := rule.shouldSkipDML(row, rawRow, ti)
 		if err != nil {

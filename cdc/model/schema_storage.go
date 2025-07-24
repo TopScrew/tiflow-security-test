@@ -18,7 +18,7 @@ import (
 	"strings"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/types"
 	"github.com/pingcap/tidb/pkg/table/tables"
@@ -49,18 +49,22 @@ type TableInfo struct {
 	// So be careful when using the TableInfo.
 	TableName TableName
 	// Version record the tso of create the table info.
-	Version uint64
-	// ColumnID -> offset in model.TableInfo.Columns
+	Version       uint64
 	columnsOffset map[int64]int
+	indicesOffset map[int64]int
+
 	// Column name -> ColumnID
 	nameToColID map[string]int64
 
 	hasUniqueColumn bool
 
-	// ColumnID -> offset in RowChangedEvents.Columns.
+	// It's a mapping from ColumnID to the offset of the columns in row changed events.
 	RowColumnsOffset map[int64]int
 
-	ColumnsFlag map[int64]*ColumnFlagType
+	ColumnsFlag map[int64]ColumnFlagType
+
+	// only for new row format decoder
+	handleColID []int64
 
 	// the mounter will choose this index to output delete events
 	// special value:
@@ -68,27 +72,11 @@ type TableInfo struct {
 	// HandleIndexTableIneligible(-2) : the table is not eligible
 	HandleIndexID int64
 
-	// IndexColumnsOffset store the offset of the columns in row changed events for
-	// unique index and primary key
-	// The reason why we need this is that the Indexes in TableInfo
-	// will not contain the PK if it is create in statement like:
-	// create table t (a int primary key, b int unique key);
-	// Every element in first dimension is a index, and the second dimension is the columns offset
-	// for example:
-	// table has 3 columns: a, b, c
-	// pk: a
-	// index1: a, b
-	// index2: a, c
-	// indexColumnsOffset: [[0], [0, 1], [0, 2]]
 	IndexColumnsOffset [][]int
-
-	// The following 3 fields, should only be used to decode datum from the raw value bytes, do not abuse those field.
 	// rowColInfos extend the model.ColumnInfo with some extra information
 	// it's the same length and order with the model.TableInfo.Columns
 	rowColInfos    []rowcodec.ColInfo
 	rowColFieldTps map[int64]*types.FieldType
-	// only for new row format decoder
-	handleColID []int64
 
 	// offset of virtual columns in TableInfo.Columns
 	// for example:
@@ -96,8 +84,6 @@ type TableInfo struct {
 	// TableInfo.Columns order: a, b, c, d
 	// VirtualColumnsOffset will be [2, 3] (indices of virtual columns c and d)
 	VirtualColumnsOffset []int
-	// rowColInfosWithoutVirtualCols is the same as rowColInfos, but without virtual columns
-	rowColInfosWithoutVirtualCols *[]rowcodec.ColInfo
 }
 
 // WrapTableInfo creates a TableInfo from a timodel.TableInfo
@@ -115,8 +101,9 @@ func WrapTableInfo(schemaID int64, schemaName string, version uint64, info *mode
 		Version:          version,
 		columnsOffset:    make(map[int64]int, len(info.Columns)),
 		nameToColID:      make(map[string]int64, len(info.Columns)),
+		indicesOffset:    make(map[int64]int, len(info.Indices)),
 		RowColumnsOffset: make(map[int64]int, len(info.Columns)),
-		ColumnsFlag:      make(map[int64]*ColumnFlagType, len(info.Columns)),
+		ColumnsFlag:      make(map[int64]ColumnFlagType, len(info.Columns)),
 		handleColID:      []int64{-1},
 		HandleIndexID:    HandleIndexTableIneligible,
 		rowColInfos:      make([]rowcodec.ColInfo, len(info.Columns)),
@@ -160,7 +147,8 @@ func WrapTableInfo(schemaID int64, schemaName string, version uint64, info *mode
 		ti.rowColFieldTps[col.ID] = ti.rowColInfos[i].Ft
 	}
 
-	for _, idx := range ti.Indices {
+	for i, idx := range ti.Indices {
+		ti.indicesOffset[idx.ID] = i
 		if ti.IsIndexUnique(idx) {
 			ti.hasUniqueColumn = true
 		}
@@ -178,30 +166,9 @@ func WrapTableInfo(schemaID int64, schemaName string, version uint64, info *mode
 		}
 	}
 
-	ti.initRowColInfosWithoutVirtualCols()
 	ti.findHandleIndex()
 	ti.initColumnsFlag()
 	return ti
-}
-
-func (ti *TableInfo) initRowColInfosWithoutVirtualCols() {
-	if len(ti.VirtualColumnsOffset) == 0 {
-		ti.rowColInfosWithoutVirtualCols = &ti.rowColInfos
-		return
-	}
-	colInfos := make([]rowcodec.ColInfo, 0, len(ti.rowColInfos)-len(ti.VirtualColumnsOffset))
-	for i, col := range ti.Columns {
-		if IsColCDCVisible(col) {
-			colInfos = append(colInfos, ti.rowColInfos[i])
-		}
-	}
-	if len(colInfos) != len(ti.rowColInfos)-len(ti.VirtualColumnsOffset) {
-		log.Panic("invalid rowColInfosWithoutVirtualCols",
-			zap.Int("len(colInfos)", len(colInfos)),
-			zap.Int("len(ti.rowColInfos)", len(ti.rowColInfos)),
-			zap.Any("ti.VirtualColumnsOffset", ti.VirtualColumnsOffset))
-	}
-	ti.rowColInfosWithoutVirtualCols = &colInfos
 }
 
 func (ti *TableInfo) findHandleIndex() {
@@ -260,7 +227,10 @@ func (ti *TableInfo) initColumnsFlag() {
 		if mysql.HasUnsignedFlag(colInfo.GetFlag()) {
 			flag.SetIsUnsigned()
 		}
-		ti.ColumnsFlag[colInfo.ID] = &flag
+		if mysql.HasZerofillFlag(colInfo.GetFlag()) {
+			flag.SetZeroFill()
+		}
+		ti.ColumnsFlag[colInfo.ID] = flag
 	}
 
 	// In TiDB, just as in MySQL, only the first column of an index can be marked as "multiple key" or "unique key",
@@ -299,67 +269,6 @@ func (ti *TableInfo) GetColumnInfo(colID int64) (info *model.ColumnInfo, exist b
 	return ti.Columns[colOffset], true
 }
 
-// ForceGetColumnInfo return the column info by ID
-// Caller must ensure `colID` exists
-func (ti *TableInfo) ForceGetColumnInfo(colID int64) *model.ColumnInfo {
-	colInfo, ok := ti.GetColumnInfo(colID)
-	if !ok {
-		log.Panic("invalid column id", zap.Int64("columnID", colID))
-	}
-	return colInfo
-}
-
-// ForceGetColumnFlagType return the column flag type by ID
-// Caller must ensure `colID` exists
-func (ti *TableInfo) ForceGetColumnFlagType(colID int64) *ColumnFlagType {
-	flag, ok := ti.ColumnsFlag[colID]
-	if !ok {
-		log.Panic("invalid column id", zap.Int64("columnID", colID))
-	}
-	return flag
-}
-
-// ForceGetColumnName return the column name by ID
-// Caller must ensure `colID` exists
-func (ti *TableInfo) ForceGetColumnName(colID int64) string {
-	return ti.ForceGetColumnInfo(colID).Name.O
-}
-
-// ForceGetColumnIDByName return column ID by column name
-// Caller must ensure `colID` exists
-func (ti *TableInfo) ForceGetColumnIDByName(name string) int64 {
-	colID, ok := ti.nameToColID[name]
-	if !ok {
-		log.Panic("invalid column name", zap.String("column", name))
-	}
-	return colID
-}
-
-// GetSchemaName returns the schema name of the table
-func (ti *TableInfo) GetSchemaName() string {
-	return ti.TableName.Schema
-}
-
-// GetTableName returns the table name of the table
-func (ti *TableInfo) GetTableName() string {
-	return ti.TableName.Table
-}
-
-// GetSchemaNamePtr returns the pointer to the schema name of the table
-func (ti *TableInfo) GetSchemaNamePtr() *string {
-	return &ti.TableName.Schema
-}
-
-// GetTableNamePtr returns the pointer to the table name of the table
-func (ti *TableInfo) GetTableNamePtr() *string {
-	return &ti.TableName.Table
-}
-
-// IsPartitionTable returns whether the table is partition table
-func (ti *TableInfo) IsPartitionTable() bool {
-	return ti.TableName.IsPartition
-}
-
 func (ti *TableInfo) String() string {
 	return fmt.Sprintf("TableInfo, ID: %d, Name:%s, ColNum: %d, IdxNum: %d, PKIsHandle: %t", ti.ID, ti.TableName, len(ti.Columns), len(ti.Indices), ti.PKIsHandle)
 }
@@ -367,12 +276,6 @@ func (ti *TableInfo) String() string {
 // GetRowColInfos returns all column infos for rowcodec
 func (ti *TableInfo) GetRowColInfos() ([]int64, map[int64]*types.FieldType, []rowcodec.ColInfo) {
 	return ti.handleColID, ti.rowColFieldTps, ti.rowColInfos
-}
-
-// GetColInfosForRowChangedEvent return column infos for non-virtual columns
-// The column order in the result is the same as the order in its corresponding RowChangedEvent
-func (ti *TableInfo) GetColInfosForRowChangedEvent() []rowcodec.ColInfo {
-	return *ti.rowColInfosWithoutVirtualCols
 }
 
 // IsColCDCVisible returns whether the col is visible for CDC
@@ -384,14 +287,9 @@ func IsColCDCVisible(col *model.ColumnInfo) bool {
 	return true
 }
 
-// HasUniqueColumn returns whether the table has a unique column
-func (ti *TableInfo) HasUniqueColumn() bool {
+// ExistTableUniqueColumn returns whether the table has a unique column
+func (ti *TableInfo) ExistTableUniqueColumn() bool {
 	return ti.hasUniqueColumn
-}
-
-// HasVirtualColumns returns whether the table has virtual columns
-func (ti *TableInfo) HasVirtualColumns() bool {
-	return len(ti.VirtualColumnsOffset) > 0
 }
 
 // IsEligible returns whether the table is a eligible table
@@ -407,7 +305,7 @@ func (ti *TableInfo) IsEligible(forceReplicate bool) bool {
 	if ti.IsView() {
 		return true
 	}
-	return ti.HasUniqueColumn()
+	return ti.ExistTableUniqueColumn()
 }
 
 // IsIndexUnique returns whether the index is unique
@@ -505,4 +403,60 @@ func (ti *TableInfo) GetPrimaryKeyColumnNames() []string {
 		}
 	}
 	return result
+}
+
+// GetSchemaName returns the schema name of the table
+func (ti *TableInfo) GetSchemaName() string {
+	return ti.TableName.Schema
+}
+
+// GetTableName returns the table name of the table
+func (ti *TableInfo) GetTableName() string {
+	return ti.TableName.Table
+}
+
+// GetSchemaNamePtr returns the pointer to the schema name of the table
+func (ti *TableInfo) GetSchemaNamePtr() *string {
+	return &ti.TableName.Schema
+}
+
+// GetTableNamePtr returns the pointer to the table name of the table
+func (ti *TableInfo) GetTableNamePtr() *string {
+	return &ti.TableName.Table
+}
+
+// ForceGetColumnInfo return the column info by ID
+// Caller must ensure `colID` exists
+func (ti *TableInfo) ForceGetColumnInfo(colID int64) *model.ColumnInfo {
+	colInfo, ok := ti.GetColumnInfo(colID)
+	if !ok {
+		log.Panic("invalid column id", zap.Int64("columnID", colID))
+	}
+	return colInfo
+}
+
+// ForceGetColumnFlagType return the column flag type by ID
+// Caller must ensure `colID` exists
+func (ti *TableInfo) ForceGetColumnFlagType(colID int64) *ColumnFlagType {
+	flag, ok := ti.ColumnsFlag[colID]
+	if !ok {
+		log.Panic("invalid column id", zap.Int64("columnID", colID))
+	}
+	return &flag
+}
+
+// ForceGetColumnName return the column name by ID
+// Caller must ensure `colID` exists
+func (ti *TableInfo) ForceGetColumnName(colID int64) string {
+	return ti.ForceGetColumnInfo(colID).Name.O
+}
+
+// ForceGetColumnIDByName return column ID by column name
+// Caller must ensure `colID` exists
+func (ti *TableInfo) ForceGetColumnIDByName(name string) int64 {
+	colID, ok := ti.nameToColID[name]
+	if !ok {
+		log.Panic("invalid column name", zap.String("column", name))
+	}
+	return colID
 }

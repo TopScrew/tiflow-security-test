@@ -18,11 +18,11 @@ import (
 	"testing"
 
 	"github.com/pingcap/errors"
-	timodel "github.com/pingcap/tidb/pkg/meta/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -36,11 +36,11 @@ func adjustBinaryProtocolForDatumWithoutVirtualCol(ctx sessionctx.Context, data 
 	colIndex := 0
 	for _, d := range data {
 		datum := types.NewDatum(d)
-		// find the next not virtual column
-		if colIndex >= len(cols) {
-			return nil, fmt.Errorf("colIndex out of bounds")
-		}
+		// fix the next not virtual column
 		for !model.IsColCDCVisible(cols[colIndex]) {
+			if colIndex >= len(cols) {
+				return nil, fmt.Errorf("colIndex out of bounds")
+			}
 			colIndex++
 		}
 		castDatum, err := table.CastValue(ctx, datum, cols[colIndex], false, false)
@@ -62,10 +62,10 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 		schema string
 		table  string
 		// set preColumns to non nil to indicate this case is for update
-		preColumns []*model.ColumnData
+		preColumns []*model.Column
 		// set columns to non nil to indicate this case is for insert
 		// set columns to nil to indicate this case is for delete
-		columns []*model.ColumnData
+		columns []*model.Column
 		preRow  []interface{}
 		row     []interface{}
 		ignore  bool
@@ -95,8 +95,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // table name does not configure in matcher, no rule to filter it
 					schema: "test",
 					table:  "teacher",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{999, "Will", 39, "male"},
 					ignore: false,
@@ -104,8 +104,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // schema name does not configure in matcher, no rule to filter it
 					schema: "no",
 					table:  "student",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{888, "Li", 45, "male"},
 					ignore: false,
@@ -113,8 +113,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "student",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{1, "Dongmen", 20, "male"},
 					ignore: true,
@@ -122,8 +122,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "student",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{2, "Rustin", 18, "male"},
 					ignore: false,
@@ -131,8 +131,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "student",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{3, "Susan", 3, "female"},
 					ignore: true,
@@ -140,8 +140,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // delete
 					schema: "test",
 					table:  "student",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{4, "Helen", 18, "female"},
 					ignore: false,
@@ -149,8 +149,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // delete
 					schema: "test",
 					table:  "student",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{5, "Madonna", 32, "female"},
 					ignore: true,
@@ -158,8 +158,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // delete
 					schema: "test",
 					table:  "student",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{6, "Madison", 48, "male"},
 					ignore: false,
@@ -167,12 +167,12 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // update, filler by new value
 					schema: "test",
 					table:  "student",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{7, "Marry", 28, "female"},
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{7, "Marry", 32, "female"},
 					ignore: true,
@@ -180,12 +180,12 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // update
 					schema: "test",
 					table:  "student",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{8, "Marilyn", 18, "female"},
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{8, "Monroe", 22, "female"},
 					ignore: false,
@@ -193,12 +193,12 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // update, filter by old value
 					schema: "test",
 					table:  "student",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{9, "Andreja", 25, "male"},
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{9, "Andreja", 25, "female"},
 					ignore: true,
@@ -223,8 +223,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "student_score",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{1, "Dongmen", 20, "male"},
 					ignore: true,
@@ -232,8 +232,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "student_score",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{2, "Rustin", 18, "male"},
 					ignore: false,
@@ -241,8 +241,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "student_score",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{3, "Susan", 3, "female"},
 					ignore: true,
@@ -250,8 +250,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // delete
 					schema: "test",
 					table:  "student_score",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{4, "Helen", 18, "female"},
 					ignore: false,
@@ -259,8 +259,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // delete
 					schema: "test",
 					table:  "student_score",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{5, "Madonna", 32, "female"},
 					ignore: true,
@@ -268,8 +268,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // delete
 					schema: "test",
 					table:  "student_score",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{6, "Madison", 48, "male"},
 					ignore: false,
@@ -277,12 +277,12 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // update, filler by new value
 					schema: "test",
 					table:  "student_score",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{7, "Marry", 28, "female"},
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{7, "Marry", 32, "female"},
 					ignore: true,
@@ -290,12 +290,12 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // update
 					schema: "test",
 					table:  "student_score",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{8, "Marilyn", 18, "female"},
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{8, "Monroe", 22, "female"},
 					ignore: false,
@@ -303,12 +303,12 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // update, filter by old value
 					schema: "test",
 					table:  "student_score",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{9, "Andreja", 25, "male"},
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{9, "Andreja", 25, "female"},
 					ignore: true,
@@ -329,8 +329,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "computer",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{1, "apple", 12888},
 					ignore: true,
@@ -338,8 +338,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "computer",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{2, "microsoft", 5888},
 					ignore: false,
@@ -360,8 +360,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "poet",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{1, "李白", "静夜思"},
 					ignore: true,
@@ -369,8 +369,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "poet",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{2, "杜甫", "石壕吏"},
 					ignore: false,
@@ -378,8 +378,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "poet",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{4, "屈原", "离骚"},
 					ignore: true,
@@ -387,8 +387,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "poet",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{3, "辛弃疾", "众里寻他千百度"},
 					ignore: true,
@@ -411,8 +411,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // do not ignore any event of test.season table
 					schema: "test",
 					table:  "season",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{1, "Spring", "January", "March"},
 					ignore: false,
@@ -420,12 +420,12 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // do not ignore any event of test.season table
 					schema: "test",
 					table:  "season",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{2, "Summer", "April", "June"},
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{2, "Summer", "April", "July"},
 					ignore: false,
@@ -433,8 +433,8 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // ignore insert event of test.autumn table
 					schema: "test",
 					table:  "autumn",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{3, "Autumn", "July", "September"},
 					ignore: true,
@@ -442,12 +442,12 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 				{ // ignore update event of test.winter table
 					schema: "test",
 					table:  "winter",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{4, "Winter", "October", "January"},
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{4, "Winter", "October", "December"},
 					ignore: true,
@@ -460,7 +460,7 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 
 	for _, tc := range testCases {
 		tableInfo := helper.execDDL(tc.ddl)
-		f, err := newExprFilter("", tc.cfg)
+		f, err := newExprFilter("", tc.cfg, config.GetDefaultReplicaConfig().SQLMode)
 		require.Nil(t, err)
 		for _, c := range tc.cases {
 			rowDatums, err := adjustBinaryProtocolForDatumWithoutVirtualCol(sessCtx, c.row, tableInfo.Columns)
@@ -468,11 +468,9 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 			preRowDatums, err := adjustBinaryProtocolForDatumWithoutVirtualCol(sessCtx, c.preRow, tableInfo.Columns)
 			require.Nil(t, err)
 			row := &model.RowChangedEvent{
-				TableInfo: &model.TableInfo{
-					TableName: model.TableName{
-						Schema: c.schema,
-						Table:  c.table,
-					},
+				Table: &model.TableName{
+					Schema: c.schema,
+					Table:  c.table,
 				},
 				Columns:    c.columns,
 				PreColumns: c.preColumns,
@@ -500,10 +498,10 @@ func TestShouldSkipDMLError(t *testing.T) {
 		schema string
 		table  string
 		// set preColumns to non nil to indicate this case is for update
-		preColumns []*model.ColumnData
+		preColumns []*model.Column
 		// set columns to non nil to indicate this case is for insert
 		// set columns to nil to indicate this case is for delete
-		columns []*model.ColumnData
+		columns []*model.Column
 		preRow  []interface{}
 		row     []interface{}
 		ignore  bool
@@ -535,8 +533,8 @@ func TestShouldSkipDMLError(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "student",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{999, "Will", 39, "male"},
 					ignore: false,
@@ -546,12 +544,12 @@ func TestShouldSkipDMLError(t *testing.T) {
 				{ // update
 					schema: "test",
 					table:  "student",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{876, "Li", 45, "female"},
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{1, "Dongmen", 20, "male"},
 					ignore: false,
@@ -561,8 +559,8 @@ func TestShouldSkipDMLError(t *testing.T) {
 				{ // delete
 					schema: "test",
 					table:  "student",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{876, "Li", 45, "female"},
 					ignore: false,
@@ -579,7 +577,7 @@ func TestShouldSkipDMLError(t *testing.T) {
 
 	for _, tc := range testCases {
 		tableInfo := helper.execDDL(tc.ddl)
-		f, err := newExprFilter("", tc.cfg)
+		f, err := newExprFilter("", tc.cfg, config.GetDefaultReplicaConfig().SQLMode)
 		require.Nil(t, err)
 		for _, c := range tc.cases {
 			rowDatums, err := adjustBinaryProtocolForDatumWithoutVirtualCol(sessCtx, c.row, tableInfo.Columns)
@@ -587,11 +585,9 @@ func TestShouldSkipDMLError(t *testing.T) {
 			preRowDatums, err := adjustBinaryProtocolForDatumWithoutVirtualCol(sessCtx, c.preRow, tableInfo.Columns)
 			require.Nil(t, err)
 			row := &model.RowChangedEvent{
-				TableInfo: &model.TableInfo{
-					TableName: model.TableName{
-						Schema: c.schema,
-						Table:  c.table,
-					},
+				Table: &model.TableName{
+					Schema: c.schema,
+					Table:  c.table,
 				},
 				Columns:    c.columns,
 				PreColumns: c.preColumns,
@@ -620,10 +616,10 @@ func TestShouldSkipDMLTableUpdated(t *testing.T) {
 		table     string
 		updateDDl string
 		// set preColumns to non nil to indicate this case is for update
-		preColumns []*model.ColumnData
+		preColumns []*model.Column
 		// set columns to non nil to indicate this case is for insert
 		// set columns to nil to indicate this case is for delete
-		columns []*model.ColumnData
+		columns []*model.Column
 		preRow  []interface{}
 		row     []interface{}
 		ignore  bool
@@ -655,8 +651,8 @@ func TestShouldSkipDMLTableUpdated(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "student",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{999, "Will", 39, "male"},
 					ignore: false,
@@ -668,8 +664,8 @@ func TestShouldSkipDMLTableUpdated(t *testing.T) {
 					table:  "student",
 					// we execute updateDDl to update the table info
 					updateDDl: "ALTER TABLE student ADD COLUMN mather char(50)",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{999, "Will", 39, "male", "Marry"},
 					ignore: false,
@@ -677,12 +673,12 @@ func TestShouldSkipDMLTableUpdated(t *testing.T) {
 				{ // update
 					schema: "test",
 					table:  "student",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{876, "Li", 45, "female"},
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{1, "Dongmen", 20, "male"},
 					ignore: true,
@@ -690,8 +686,8 @@ func TestShouldSkipDMLTableUpdated(t *testing.T) {
 				{ // delete
 					schema: "test",
 					table:  "student",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{876, "Li", 45, "female", "Maria"},
 					ignore: true,
@@ -715,8 +711,8 @@ func TestShouldSkipDMLTableUpdated(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "worker",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{999, "Will", 39, "male", "Apple"},
 					ignore: true,
@@ -724,8 +720,8 @@ func TestShouldSkipDMLTableUpdated(t *testing.T) {
 				{ // insert
 					schema: "test",
 					table:  "worker",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{11, "Tom", 21, "male", "FaceBook"},
 					ignore: false,
@@ -733,12 +729,12 @@ func TestShouldSkipDMLTableUpdated(t *testing.T) {
 				{ // update
 					schema: "test",
 					table:  "worker",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{876, "Li", 45, "female"},
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{1, "Dongmen", 20, "male"},
 					ignore: true,
@@ -746,8 +742,8 @@ func TestShouldSkipDMLTableUpdated(t *testing.T) {
 				{ // delete
 					schema: "test",
 					table:  "worker",
-					preColumns: []*model.ColumnData{
-						{ColumnID: 0},
+					preColumns: []*model.Column{
+						{Name: "none"},
 					},
 					preRow: []interface{}{876, "Li", 45, "female", "Google"},
 					ignore: true,
@@ -756,8 +752,8 @@ func TestShouldSkipDMLTableUpdated(t *testing.T) {
 					schema:    "test",
 					table:     "worker",
 					updateDDl: "ALTER TABLE worker DROP COLUMN company",
-					columns: []*model.ColumnData{
-						{ColumnID: 0},
+					columns: []*model.Column{
+						{Name: "none"},
 					},
 					row:    []interface{}{999, "Will", 39, "male"},
 					ignore: false,
@@ -774,7 +770,7 @@ func TestShouldSkipDMLTableUpdated(t *testing.T) {
 
 	for _, tc := range testCases {
 		tableInfo := helper.execDDL(tc.ddl)
-		f, err := newExprFilter("", tc.cfg)
+		f, err := newExprFilter("", tc.cfg, config.GetDefaultReplicaConfig().SQLMode)
 		require.Nil(t, err)
 		for _, c := range tc.cases {
 			if c.updateDDl != "" {
@@ -785,11 +781,9 @@ func TestShouldSkipDMLTableUpdated(t *testing.T) {
 			preRowDatums, err := adjustBinaryProtocolForDatumWithoutVirtualCol(sessCtx, c.preRow, tableInfo.Columns)
 			require.Nil(t, err)
 			row := &model.RowChangedEvent{
-				TableInfo: &model.TableInfo{
-					TableName: model.TableName{
-						Schema: c.schema,
-						Table:  c.table,
-					},
+				Table: &model.TableName{
+					Schema: c.schema,
+					Table:  c.table,
 				},
 				Columns:    c.columns,
 				PreColumns: c.preColumns,
@@ -896,7 +890,7 @@ func TestVerify(t *testing.T) {
 			ti := helper.execDDL(ddl)
 			tableInfos = append(tableInfos, ti)
 		}
-		f, err := newExprFilter("", tc.cfg)
+		f, err := newExprFilter("", tc.cfg, config.GetDefaultReplicaConfig().SQLMode)
 		require.Nil(t, err)
 		err = f.verify(tableInfos)
 		require.True(t, errors.ErrorEqual(tc.err, err), "case: %+v", tc, err)
@@ -914,11 +908,11 @@ func TestGetColumnFromError(t *testing.T) {
 
 	testCases := []testCase{
 		{
-			err:      plannererrors.ErrUnknownColumn.FastGenByArgs("mother", "expression"),
+			err:      core.ErrUnknownColumn.FastGenByArgs("mother", "expression"),
 			expected: "mother",
 		},
 		{
-			err:      plannererrors.ErrUnknownColumn.FastGenByArgs("company", "expression"),
+			err:      core.ErrUnknownColumn.FastGenByArgs("company", "expression"),
 			expected: "company",
 		},
 		{

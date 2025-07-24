@@ -31,7 +31,6 @@ function run() {
 	fi
 
 	if [ "$SINK_TYPE" == "pulsar" ]; then
-		run_pulsar_cluster $WORK_DIR normal
 		SINK_URI="pulsar://127.0.0.1:6650/$TOPIC_NAME?protocol=canal-json&enable-tidb-extension=true"
 	fi
 
@@ -44,19 +43,17 @@ function run() {
 	fi
 
 	if [ "$SINK_TYPE" == "pulsar" ]; then
-		run_pulsar_consumer --upstream-uri $SINK_URI
+		run_pulsar_consumer $WORK_DIR $SINK_URI
 	fi
 
 	run_sql_file $CUR/data/data.sql ${UP_TIDB_HOST} ${UP_TIDB_PORT}
 
 	# sync_diff can't check non-exist table, so we check expected tables are created in downstream first
-	run_sql "CREATE TABLE test.finish_mark1 (a int primary key);" ${UP_TIDB_HOST} ${UP_TIDB_PORT}
-	check_table_exists test.finish_mark1 ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT} 200
+	check_table_exists test.finish_mark ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT} 200
 	check_sync_diff $WORK_DIR $CUR/conf/diff_config.toml
 
 	run_sql_file $CUR/data/data_gbk.sql ${UP_TIDB_HOST} ${UP_TIDB_PORT}
-	run_sql "CREATE TABLE test.finish_mark2 (a int primary key);" ${UP_TIDB_HOST} ${UP_TIDB_PORT}
-	check_table_exists test.finish_mark2 ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT} 200
+	check_table_exists test.finish_mark ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT} 200
 	check_sync_diff $WORK_DIR $CUR/conf/diff_config.toml
 
 	cleanup_process $CDC_BINARY

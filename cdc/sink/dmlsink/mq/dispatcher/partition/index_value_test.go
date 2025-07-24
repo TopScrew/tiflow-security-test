@@ -16,10 +16,7 @@ package partition
 import (
 	"testing"
 
-	timodel "github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/types"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/stretchr/testify/require"
@@ -28,111 +25,128 @@ import (
 func TestIndexValueDispatcher(t *testing.T) {
 	t.Parallel()
 
-	tableInfoWithSinglePK := model.BuildTableInfo("test", "t1", []*model.Column{
-		{
-			Name: "a",
-			Flag: model.HandleKeyFlag | model.PrimaryKeyFlag,
-		}, {
-			Name: "b",
-		},
-	}, [][]int{{0}})
-
-	tableInfoWithCompositePK := model.BuildTableInfo("test", "t2", []*model.Column{
-		{
-			Name: "a",
-			Flag: model.HandleKeyFlag | model.PrimaryKeyFlag,
-		}, {
-			Name: "b",
-			Flag: model.HandleKeyFlag | model.PrimaryKeyFlag,
-		},
-	}, [][]int{{0, 1}})
 	testCases := []struct {
 		row             *model.RowChangedEvent
 		expectPartition int32
 	}{
 		{row: &model.RowChangedEvent{
-			TableInfo: tableInfoWithSinglePK,
-			Columns: model.Columns2ColumnDatas([]*model.Column{
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t1",
+			},
+			Columns: []*model.Column{
 				{
 					Name:  "a",
 					Value: 11,
+					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: 22,
+					Flag:  0,
 				},
-			}, tableInfoWithSinglePK),
+			},
 		}, expectPartition: 2},
 		{row: &model.RowChangedEvent{
-			TableInfo: tableInfoWithSinglePK,
-			Columns: model.Columns2ColumnDatas([]*model.Column{
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t1",
+			},
+			Columns: []*model.Column{
 				{
 					Name:  "a",
 					Value: 22,
+					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: 22,
+					Flag:  0,
 				},
-			}, tableInfoWithSinglePK),
+			},
 		}, expectPartition: 11},
 		{row: &model.RowChangedEvent{
-			TableInfo: tableInfoWithSinglePK,
-			Columns: model.Columns2ColumnDatas([]*model.Column{
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t1",
+			},
+			Columns: []*model.Column{
 				{
 					Name:  "a",
 					Value: 11,
+					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: 33,
+					Flag:  0,
 				},
-			}, tableInfoWithSinglePK),
+			},
 		}, expectPartition: 2},
 		{row: &model.RowChangedEvent{
-			TableInfo: tableInfoWithCompositePK,
-			Columns: model.Columns2ColumnDatas([]*model.Column{
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t2",
+			},
+			Columns: []*model.Column{
 				{
 					Name:  "a",
 					Value: 11,
+					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: 22,
+					Flag:  model.HandleKeyFlag,
 				},
-			}, tableInfoWithCompositePK),
+			},
 		}, expectPartition: 5},
 		{row: &model.RowChangedEvent{
-			TableInfo: tableInfoWithCompositePK,
-			Columns: model.Columns2ColumnDatas([]*model.Column{
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t2",
+			},
+			Columns: []*model.Column{
 				{
 					Name:  "b",
 					Value: 22,
+					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "a",
 					Value: 11,
+					Flag:  model.HandleKeyFlag,
 				},
-			}, tableInfoWithCompositePK),
+			},
 		}, expectPartition: 5},
 		{row: &model.RowChangedEvent{
-			TableInfo: tableInfoWithCompositePK,
-			Columns: model.Columns2ColumnDatas([]*model.Column{
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t2",
+			},
+			Columns: []*model.Column{
 				{
 					Name:  "a",
 					Value: 11,
+					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: 0,
+					Flag:  model.HandleKeyFlag,
 				},
-			}, tableInfoWithCompositePK),
+			},
 		}, expectPartition: 14},
 		{row: &model.RowChangedEvent{
-			TableInfo: tableInfoWithCompositePK,
-			Columns: model.Columns2ColumnDatas([]*model.Column{
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t2",
+			},
+			Columns: []*model.Column{
 				{
 					Name:  "a",
 					Value: 11,
+					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: 33,
+					Flag:  model.HandleKeyFlag,
 				},
-			}, tableInfoWithCompositePK),
+			},
 		}, expectPartition: 2},
 	}
 	p := NewIndexValueDispatcher("")
@@ -146,38 +160,55 @@ func TestIndexValueDispatcher(t *testing.T) {
 func TestIndexValueDispatcherWithIndexName(t *testing.T) {
 	t.Parallel()
 
-	tidbTableInfo := &timodel.TableInfo{
-		ID:         100,
-		Name:       pmodel.NewCIStr("t1"),
-		PKIsHandle: true,
-		Columns: []*timodel.ColumnInfo{
-			{ID: 1, Name: pmodel.NewCIStr("COL2"), Offset: 1, FieldType: *types.NewFieldType(mysql.TypeLong)},
-			{ID: 2, Name: pmodel.NewCIStr("Col1"), Offset: 0, FieldType: *types.NewFieldType(mysql.TypeLong)},
-			{ID: 3, Name: pmodel.NewCIStr("col3"), Offset: 2, FieldType: *types.NewFieldType(mysql.TypeLong)},
+	event := &model.RowChangedEvent{
+		Table: &model.TableName{
+			Schema: "test",
+			Table:  "t1",
 		},
-		Indices: []*timodel.IndexInfo{
-			{
-				Primary: true,
-				Name:    pmodel.NewCIStr("index1"),
-				Columns: []*timodel.IndexColumn{
-					{
-						Name: pmodel.NewCIStr("COL2"), Offset: 1,
+		TableInfo: model.WrapTableInfo(100, "test", 100, &timodel.TableInfo{
+			Indices: []*timodel.IndexInfo{
+				{
+					Name: timodel.NewCIStr("index1"),
+					Columns: []*timodel.IndexColumn{
+						{Name: timodel.NewCIStr("COL2"), Offset: 1},
+						{Name: timodel.NewCIStr("Col1"), Offset: 0},
 					},
-					{
-						Name: pmodel.NewCIStr("Col1"), Offset: 0,
-					},
+					Primary: true,
 				},
 			},
-		},
-	}
-	tableInfo := model.WrapTableInfo(100, "test", 33, tidbTableInfo)
-
-	event := &model.RowChangedEvent{
-		TableInfo: tableInfo,
-		Columns: []*model.ColumnData{
-			{ColumnID: 1, Value: 11},
-			{ColumnID: 2, Value: 22},
-			{ColumnID: 3, Value: 33},
+			Columns: []*timodel.ColumnInfo{
+				{
+					ID:     0,
+					Name:   timodel.NewCIStr("COL2"),
+					Offset: 1,
+				},
+				{
+					ID:     1,
+					Name:   timodel.NewCIStr("Col1"),
+					Offset: 0,
+				},
+				{
+					ID:     2,
+					Name:   timodel.NewCIStr("col3"),
+					Offset: 2,
+				},
+			},
+		}),
+		Columns: []*model.Column{
+			{
+				Name:  "Col1",
+				Value: 11,
+				Flag:  model.HandleKeyFlag,
+			},
+			{
+				Name:  "COL2",
+				Value: 22,
+				Flag:  model.HandleKeyFlag,
+			},
+			{
+				Name:  "col3",
+				Value: 33,
+			},
 		},
 	}
 
